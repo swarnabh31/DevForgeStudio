@@ -1,12 +1,14 @@
-# OpenCode Agent Studio
+# DevForge Studio
+
+> **Your Local-First AI Software Engineering Studio.**
 
 A **local-first, in-browser AI coding agent**. It reads, searches, edits, and verifies **real files on your disk** using **your own locally-downloaded models** (Ollama or any OpenAI-compatible local server). No cloud APIs, no telemetry, no subscriptions — your code never leaves your machine.
 
 ---
 
-## Why OpenCode Agent Studio?
+## Why DevForge Studio?
 
-| | Cloud AI coding tools | OpenCode Agent Studio |
+| | Cloud AI coding tools | DevForge Studio |
 |---|---|---|
 | Code privacy | Uploaded to third-party servers | Never leaves your disk |
 | Cost | Monthly subscription / per-token | Free — runs on your own hardware |

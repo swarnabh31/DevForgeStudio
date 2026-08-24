@@ -160,7 +160,7 @@ export default function App() {
           {
             id: 'msg-welcome',
             sender: 'agent',
-            content: `Welcome to OpenCode Agent Studio! 🚀
+            content: `Welcome to DevForge Studio! 🚀
 
 I am your open-source autonomous AI coding workspace. I can help you write, refactor, run tests, diagnose language server errors, and execute code in parallel sessions using your local system LLM.
 
@@ -1020,7 +1020,7 @@ What would you like to build or inspect today?`,
         {
           id: 'msg-welcome',
           sender: 'agent',
-          content: `OpenCode Agent Studio factory reset complete! 🚀\n\nWorkspace files, sessions, and chat logs restored to initial state.`,
+          content: `DevForge Studio factory reset complete! 🚀\n\nWorkspace files, sessions, and chat logs restored to initial state.`,
           timestamp: new Date().toLocaleTimeString()
         }
       ],

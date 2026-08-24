@@ -309,7 +309,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
             <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-emerald-500/20 via-teal-500/20 to-cyan-500/20 border border-emerald-500/30 flex items-center justify-center mb-4 shadow-lg shadow-emerald-500/10">
               <Bot className="w-8 h-8 text-emerald-400" />
             </div>
-            <h3 className="font-bold text-lg text-white mb-1">OpenCode Agent Studio</h3>
+            <h3 className="font-bold text-lg text-white mb-1">DevForge Studio</h3>
             <p className="text-xs text-slate-400 max-w-md mb-6 leading-relaxed">
               Open-source autonomous AI coding workspace powered by LangGraph, LSP diagnostics, multi-session execution, and multimodal context.
             </p>

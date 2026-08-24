@@ -19,7 +19,7 @@ export const FirstRunGuide: React.FC<FirstRunGuideProps> = ({ onRescan, isScanni
       <h2 className="font-semibold text-white">No local models detected</h2>
     </div>
     <p className="text-sm text-slate-400 mb-4">
-      OpenCode Agent Studio runs entirely on your machine. Get a model running in under a minute:
+      DevForge Studio runs entirely on your machine. Get a model running in under a minute:
     </p>
     <ol className="space-y-3">
       {STEPS.map((step, i) => (

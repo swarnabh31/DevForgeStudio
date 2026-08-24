@@ -1,4 +1,4 @@
-﻿import express, { Request, Response } from 'express';
+import express, { Request, Response } from 'express';
 import { randomUUID as cryptoRandomUUID } from 'crypto';
 import cors from 'cors';
 import path from 'path';
@@ -32,7 +32,7 @@ app.use(express.json({ limit: '50mb' }));
 let globalWorkspace: Record<string, WorkspaceFile> = { ...DEFAULT_WORKSPACE_FILES };
 let sessionWorkspaces: Record<string, Record<string, WorkspaceFile>> = {};
 
-// Helper: REAL diagnostics — tsc --noEmit + ruff via server/diagnostics.ts,
+// Helper: REAL diagnostics � tsc --noEmit + ruff via server/diagnostics.ts,
 // mapped to the LSPDiagnostic shape used by the UI. No regex simulation.
 function mapRealDiagnostics(diags: RealDiagnostic[]): LSPDiagnostic[] {
   return diags.map((d, i) => ({
@@ -220,7 +220,7 @@ function ensureWorkspaceWatcher(sessionId: string): void {
             isModified: ws[rel].originalContent !== content
           };
         } catch {
-          /* unreadable — keep stale copy */
+          /* unreadable � keep stale copy */
         }
       }
     }
@@ -278,7 +278,7 @@ async function retrieveRelevantMemories(query: string, k = 6): Promise<ServerLon
 
   scored.sort((a, b) => b.score - a.score);
   const top = scored.filter((s) => s.score > 0.12).slice(0, k).map((s) => s.memory);
-  // Never return nothing — old behavior (all memories) beats silence
+  // Never return nothing � old behavior (all memories) beats silence
   return top.length ? top : serverLongTermMemories.slice(0, k);
 }
 
@@ -339,7 +339,7 @@ app.post('/api/memory/clear', (req: Request, res: Response) => {
   res.json({ success: true, longTermMemories: [] });
 });
 
-// Memory API AUTO-EXTRACT — uses the local LLM to mine durable project facts
+// Memory API AUTO-EXTRACT � uses the local LLM to mine durable project facts
 app.post('/api/memory/extract', async (req: Request, res: Response) => {
   const { sessionId = 'default', modelId, modelEndpoint } = req.body || {};
   const root = getWorkspaceRoot(sessionId);
@@ -753,7 +753,7 @@ app.get('/api/workspace/index', (req: Request, res: Response) => {
   }
 });
 
-// A4: Import graph â€” "what breaks if I change X?"
+// A4: Import graph — "what breaks if I change X?"
 app.get('/api/tools/import-graph', (req: Request, res: Response) => {
   const sessionId = (req.query.sessionId as string) || 'default';
   const target = req.query.path as string;
@@ -769,7 +769,7 @@ app.get('/api/tools/import-graph', (req: Request, res: Response) => {
   }
 });
 
-// LSP Diagnosis Endpoint — REAL tsc --noEmit / ruff diagnostics (10s-cached)
+// LSP Diagnosis Endpoint � REAL tsc --noEmit / ruff diagnostics (10s-cached)
 app.post('/api/lsp/diagnose', async (req: Request, res: Response) => {
   const { filePath, sessionId = 'default' } = req.body;
 
@@ -812,7 +812,7 @@ app.post('/api/attachments/parse', async (req: Request, res: Response) => {
           return res.json({
             name,
             summary: 'PDF contains no extractable text (likely scanned images)',
-            parsedText: `[PDF ${name}: no extractable text — scanned/image-only PDF]`
+            parsedText: `[PDF ${name}: no extractable text � scanned/image-only PDF]`
           });
         }
         return res.json({
@@ -840,7 +840,7 @@ app.post('/api/attachments/parse', async (req: Request, res: Response) => {
   });
 });
 
-// Code Execution — REAL allowlisted command execution in the session workspace.
+// Code Execution � REAL allowlisted command execution in the session workspace.
 app.post('/api/workspace/execute', (req: Request, res: Response) => {
   const { command, sessionId = 'default' } = req.body;
 
@@ -851,7 +851,7 @@ app.post('/api/workspace/execute', (req: Request, res: Response) => {
   // Same security policy as the agent loop's run_command tool
   const check = isCommandAllowed(command);
   if (!check.ok) {
-    return res.status(403).json({ error: `Command rejected — ${check.reason}`, command });
+    return res.status(403).json({ error: `Command rejected � ${check.reason}`, command });
   }
 
   const root = getWorkspaceRoot(sessionId);
@@ -1188,7 +1188,7 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
 
   // Cross-turn compaction: keep the last 8 turns verbatim; summarize-truncate
   // older turns to their head so long conversations don't drown the context.
-  const KEEP_VERBATIM = 16; // messages (≈8 turns)
+  const KEEP_VERBATIM = 16; // messages (�8 turns)
   if (history.length > KEEP_VERBATIM) {
     const older = history.slice(0, -KEEP_VERBATIM);
     const recent = history.slice(-KEEP_VERBATIM);
@@ -1196,7 +1196,7 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
       role: m.role,
       content:
         m.content.length > 300
-          ? m.content.slice(0, 300) + '…[earlier message truncated]'
+          ? m.content.slice(0, 300) + '�[earlier message truncated]'
           : m.content
     }));
     history.length = 0;
@@ -1216,7 +1216,7 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
 1. PLAN FIRST: before any edits, briefly state a numbered plan of the changes you will make, then execute the items one by one in order.
 2. You have tools: list_files, search, read_file, file_outline, write_file, apply_patch, run_command, git_diff.
 3. ALWAYS investigate before editing. Prefer apply_patch for edits; write_file only for new files.
-4. EXPLORE EFFICIENTLY: use list_files/file_outline/search first. Never read_file an entire file larger than ~400 lines — read the specific ranges you need or work from its outline. Do not re-read a file you have already read unless it changed.
+4. EXPLORE EFFICIENTLY: use list_files/file_outline/search first. Never read_file an entire file larger than ~400 lines � read the specific ranges you need or work from its outline. Do not re-read a file you have already read unless it changed.
 5. BUDGET YOUR WORK: you have a limited number of iterations. Start editing as soon as you understand enough; do not exhaust your budget on exploration alone. If the task is large, complete the most important changes first and verify them.
 6. VERIFY with run_command (npm test / npm run lint / tsc --noEmit) when relevant.
 7. Summarize which files you changed and why.
@@ -1270,7 +1270,7 @@ Use tools to read any file's full contents on demand.`;
     let continuations = 0;
     while (result.hitIterationCap && !controller.signal.aborted && continuations < 5) {
       continuations++;
-      send({ type: 'token', delta: `\n\n⏭ Iteration budget reached — continuing automatically (pass ${continuations + 1})…\n\n` });
+      send({ type: 'token', delta: `\n\n? Iteration budget reached � continuing automatically (pass ${continuations + 1})�\n\n` });
       const before = result.filesChanged.length;
       const next = await runLoop(
         'Continue your previous work. Do not repeat completed steps. Finish any remaining edits, verify them, then give your final summary.'
@@ -1311,7 +1311,7 @@ Use tools to read any file's full contents on demand.`;
       { id: 'analyze_context', label: '1. Analyze Context & Prompt', status: 'success', durationMs: 40 },
       ...planItems.map((item, i) => ({
         id: `plan-${i}`,
-        label: `Plan ${i + 1}. ${item.length > 70 ? item.slice(0, 67) + '…' : item}`,
+        label: `Plan ${i + 1}. ${item.length > 70 ? item.slice(0, 67) + '�' : item}`,
         status: 'success' as const
       })),
       {
@@ -1337,7 +1337,7 @@ Use tools to read any file's full contents on demand.`;
         actions: result.toolCalls.map((t) => ({
           type: t.name.startsWith('run') ? 'run_command' : 'read_file',
           target: t.name,
-          description: `${t.name}: ${t.ok ? 'ok' : 'failed'} â€” ${String(t.content).slice(0, 120)}`,
+          description: `${t.name}: ${t.ok ? 'ok' : 'failed'} — ${String(t.content).slice(0, 120)}`,
           status: t.ok ? 'completed' : 'failed'
         })),
         lspDiagnostics,
@@ -1381,7 +1381,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '127.0.0.1', () => {
-    console.log(`ðŸš€ OpenCode Agent Studio server running on http://127.0.0.1:${PORT} (local only)`);
+    console.log(`🚀 DevForge Studio server running on http://127.0.0.1:${PORT} (local only)`);
   });
 }
 

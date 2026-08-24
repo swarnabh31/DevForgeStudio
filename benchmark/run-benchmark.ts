@@ -1,5 +1,5 @@
 /**
- * OpenCode Agent Studio — Real-World Benchmark Suite
+ * DevForge Studio — Real-World Benchmark Suite
  *
  * NON-INVASIVE BY DESIGN:
  *  - Never modifies application source files.
@@ -493,7 +493,7 @@ function buildReport(
   meta: Record<string, any>
 ): string {
   const lines: string[] = [];
-  lines.push(`# OpenCode Agent Studio — Real-World Benchmark Report`);
+  lines.push(`# DevForge Studio — Real-World Benchmark Report`);
   lines.push(`\n_Generated: ${new Date().toISOString()}_\n`);
   lines.push(`**Projects tested:** ${results.length} · **Model:** ${meta.modelUsed || '(default)'} · **Agent edit tests:** ${RUN_AGENT_TESTS ? 'ON (temp copies)' : 'OFF'}\n`);
   lines.push(`## Overall Score: ${(scores.overall * 100).toFixed(1)} / 100\n`);
@@ -545,7 +545,7 @@ function buildReport(
 // ---------------- Main ----------------
 
 (async function main() {
-  console.log('▶ OpenCode Agent Studio Benchmark');
+  console.log('▶ DevForge Studio Benchmark');
   console.log(`  Projects dir: ${PROJECTS_DIR}`);
   console.log(`  Max projects: ${MAX_PROJECTS} | Agent edit tests: ${RUN_AGENT_TESTS ? 'ON' : 'OFF'}\n`);
 

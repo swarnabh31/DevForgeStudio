@@ -1,4 +1,4 @@
-# plan.md — Making OpenCode Agent Studio a Dependable Coding Agent
+# plan.md — Making DevForge Studio a Dependable Coding Agent
 
 > Working execution plan derived from `Memory.md` (§4 gap analysis, §5 roadmap).
 > Goal: turn the current UI + mock-agent into an agent that can genuinely

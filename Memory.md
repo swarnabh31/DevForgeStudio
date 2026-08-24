@@ -1,4 +1,4 @@
-# Memory.md — OpenCode Agent Studio
+# Memory.md — DevForge Studio
 
 > Project memory for the next session. Explains the current state and functions of the app.
 >
@@ -9,7 +9,7 @@
 
 ## 1. What this project is
 
-**OpenCode Agent Studio** is a local-first, in-browser AI coding agent that reads, searches, edits,
+**DevForge Studio** is a local-first, in-browser AI coding agent that reads, searches, edits,
 and verifies **real files on the user's disk** using **their own downloaded local models**
 (Ollama / any OpenAI-compatible local server). No external/cloud APIs.
 
