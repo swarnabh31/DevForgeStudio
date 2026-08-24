@@ -1,0 +1,6 @@
+{
+  "name": "OpenCode Agent Studio",
+  "description": "Open-source multi-session AI coding agent with LangGraph workflow, LSP diagnostics, and multi-modal context.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_LOCAL_MODELS"]
+}
