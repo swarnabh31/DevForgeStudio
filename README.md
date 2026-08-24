@@ -158,20 +158,20 @@ Open **http://127.0.0.1:3000**. Then:
 ```
 server.ts                Express backend + Vite middleware + all routes
 server/
-â”œâ”€â”€ lib.ts               resolveSafePath guard, language map, ignored dirs
-â”œâ”€â”€ fsTools.ts           gitignore-aware walker, ranged reads, search, outlines
-â”œâ”€â”€ agentLoop.ts         tool schemas + executeTool + runAgentLoop (streaming,
-â”‚                        permissions, thinking control, JSON-action fallback)
-â”œâ”€â”€ backups.ts           snapshot engine + list/revert
-â”œâ”€â”€ diffUtil.ts          unified diffs from backup-vs-disk
-â”œâ”€â”€ diagnostics.ts       tsc --noEmit + ruff runners/parsers, import graph
-â”œâ”€â”€ systemProfile.ts     GPU/VRAM/RAM/CPU detection
-â”œâ”€â”€ taskProfiles.ts      8 task modes → sampling params + personas
-â””â”€â”€ persistence.ts       .opencode/store.json + logs/runs.jsonl
+├── lib.ts               resolveSafePath guard, language map, ignored dirs
+├── fsTools.ts           gitignore-aware walker, ranged reads, search, outlines
+├── agentLoop.ts         tool schemas + executeTool + runAgentLoop (streaming,
+│                        permissions, thinking control, JSON-action fallback)
+├── backups.ts           snapshot engine + list/revert
+├── diffUtil.ts          unified diffs from backup-vs-disk
+├── diagnostics.ts       tsc --noEmit + ruff runners/parsers, import graph
+├── systemProfile.ts     GPU/VRAM/RAM/CPU detection
+├── taskProfiles.ts      8 task modes → sampling params + personas
+└── persistence.ts       .opencode/store.json + logs/runs.jsonl
 src/
-â”œâ”€â”€ App.tsx              state engine; NDJSON streaming client; resizable split;
-â”‚                        slash commands
-â””â”€â”€ components/          chat UI, diffs, CodeMirror workspace, pipeline view…
+├── App.tsx              state engine; NDJSON streaming client; resizable split;
+│                        slash commands
+└── components/          chat UI, diffs, CodeMirror workspace, pipeline view…
 tests/                   69 Vitest tests
 BENCHMARK.md             benchmark methodology + published results
 ```
