@@ -95,11 +95,7 @@ Tested against real repositories on the developer's machine (RTX 5090 + qwen3-co
 | 34 real projects, read-only analysis | **93.1 / 100** |
 | 6 projects with live agent edits | **91.3 / 100** (5/6 perfect edit → preserve → revert cycles) |
 
-The harness (`benchmark/run-benchmark.ts`) is non-invasive: read-only tests never modify repos; live-edit tests run on temporary copies only. Run it yourself:
-
-```bash
-npx tsx benchmark/run-benchmark.ts --max 40 [--agent] [--projects-dir <path>]
-```
+Tested against real repositories with an automated, non-invasive harness � read-only checks never modify repos; live-edit tests run on temporary copies only. Full methodology and results: **[BENCHMARK.md](BENCHMARK.md)**.
 
 ---
 
@@ -177,7 +173,7 @@ src/
 │                        slash commands
 └── components/          chat UI, diffs, CodeMirror workspace, pipeline view…
 tests/                   69 Vitest tests
-benchmark/               non-invasive benchmark harness
+BENCHMARK.md             benchmark methodology + published results
 ```
 
 The agent streams over `POST /api/agent/stream` as newline-delimited JSON events (`iteration`, `token`, `tool_call`, `tool_result`, `files_changed`, `permission_request`, `done`). Sessions persist locally; `/test`, `/fix`, `/explain`, and `/new-session` slash commands are available in chat.

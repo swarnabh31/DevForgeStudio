@@ -12,3 +12,5 @@ benchmark/results/
 
 Memory.md
 plan.md
+
+benchmark/run-benchmark.ts
