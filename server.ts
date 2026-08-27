@@ -1941,7 +1941,11 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
       const task = prompt.length > 2000 ? prompt.slice(0, 2000) + '\u2026' : prompt;
       const next = await runAgentLoop({
         ...loopOpts,
-        prompt: `Original task: ${task}\n\nContinue that task from where it left off. Do not repeat completed steps. Finish any remaining work, verify it, then give your final summary.`,
+        // Be explicit about the durable task ledger: it is re-injected into the
+        // system prompt for this pass, and it is the authoritative record of
+        // which step was in progress / how many are already done. Without this
+        // the model re-derives the plan and replays completed steps.
+        prompt: `Original task: ${task}\n\nIteration budget was exhausted mid-task. Read the durable task ledger in your system prompt (the <<<TASK_LEDGER ... >>>TASK_LEDGER block): it lists every step with its status and a "Next action: continue step: …" line. Resume EXACTLY from that step. Do NOT redo or re-verify any step already marked completed. Finish the remaining steps, verify the work, then give your final summary.`,
         // Resume with pass 1's full message list (tool calls + results) so the
         // model continues from where it stopped instead of re-exploring.
         priorMessages: result.messages

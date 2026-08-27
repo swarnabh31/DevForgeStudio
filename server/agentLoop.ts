@@ -1200,6 +1200,30 @@ async function executeToolInner(
         try {
           options.onPlanUpdate?.(steps);
         } catch {}
+        // P3.6: mirror the plan into the durable task ledger (best-effort).
+        // Without this, a live plan exists only in server memory — when the
+        // iteration cap is hit mid-task and the run continues (or resumes
+        // after a crash), the model has no explicit record of WHICH step it
+        // was on and re-derives the plan from scratch, redoing completed work.
+        // The ledger is re-injected into the system prompt every iteration and
+        // survives process restarts, so the "current step" survives handoffs.
+        if (options.runId) {
+          try {
+            // Point next_action at the in-progress step (else the first
+            // pending one) so a resumed run knows EXACTLY which step to pick
+            // up — "finish 'X'", not "restart the task".
+            const nextStep =
+              steps.find((s: any) => s.status === 'in_progress') ||
+              steps.find((s: any) => s.status === 'pending') ||
+              steps[steps.length - 1];
+            applyUpdate(root, options.runId, {
+              steps: steps.map((s: any) => ({ text: s.text, status: s.status })),
+              next_action: `continue step: ${nextStep.text}`
+            });
+          } catch {
+            /* ledger mirroring is best-effort; the plan event still fired */
+          }
+        }
         const done = steps.filter((s: any) => s.status === 'completed').length;
         const note = call.arguments?.note ? ` — ${String(call.arguments.note).slice(0, 120)}` : '';
         return {

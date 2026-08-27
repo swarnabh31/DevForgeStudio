@@ -496,6 +496,107 @@ describe('runAgentLoop: durable task ledger (P1.5a)', () => {
     expect(body).toContain('finish phase two');
   });
 
+  it('a live update_plan is persisted to the durable ledger and a continuation pass resumes from the in-progress step', async () => {
+    const runId = 'ledger-plan-resume-1';
+    const stepTexts = {
+      done: 'scaffold the project',
+      inProgress: 'implement core parser',
+      pending: 'wire up the CLI'
+    };
+
+    // Pass 1: the model commits a 3-step plan (using update_plan, the LIVE plan
+    // tool — NOT update_task) with the first step already done and the second
+    // in-progress, then the run "dies" (no final text) before finishing.
+    activeMock = await startMockOllama([
+      toolCallMessage('update_plan', {
+        steps: [
+          { text: stepTexts.done, status: 'completed' },
+          { text: stepTexts.inProgress, status: 'in_progress' },
+          { text: stepTexts.pending, status: 'pending' }
+        ]
+      })
+    ]);
+    await runAgentLoop({
+      root: wsRoot,
+      prompt: 'Scaffold, implement the core parser, and wire up the CLI',
+      modelId: 'test-model',
+      endpoints: [`http://127.0.0.1:${activeMock.port}`],
+      history: [],
+      systemContext: 'You are a test agent.',
+      maxIterations: 1,
+      runId
+    });
+
+    // The live plan must have been mirrored onto the durable ledger so that a
+    // later handoff (auto-continue or cross-process resume) survives. Without
+    // this, only the message transcript knows the plan, and a continuation
+    // pass re-derives it from scratch and replays completed steps.
+    const ledger1 = loadLedger(wsRoot, runId);
+    expect(ledger1).not.toBeNull();
+    expect(ledger1?.steps).toHaveLength(3);
+    expect(ledger1?.steps[0].status).toBe('completed');
+    expect(ledger1?.steps[1].status).toBe('in_progress');
+    expect(ledger1?.steps[2].status).toBe('pending');
+    // next_action must point at the in-progress step — the "start here" signal.
+    expect(ledger1?.nextAction).toContain(stepTexts.inProgress);
+
+    // Pass 2: a brand-new conversation (fresh system context) seeded with
+    // pass 1's transcript. The first request must already carry the saved
+    // progress AND the continue-step instruction, so the model picks up at
+    // "implement core parser" instead of redoing "scaffold the project".
+    activeMock = await startMockOllama([
+      textMessage('Resuming at "implement core parser" — scaffold is already done.')
+    ]);
+    // Simulate the server's auto-continue path: seed priorMessages from pass 1.
+    const pass2 = await runAgentLoop({
+      root: wsRoot,
+      prompt: `Original task: Scaffold, implement the core parser, and wire up the CLI\n\nResume EXACTLY from the in-progress step noted in the durable task ledger. Do not redo completed steps.`,
+      modelId: 'test-model',
+      endpoints: [`http://127.0.0.1:${activeMock.port}`],
+      history: [],
+      systemContext: 'You are a test agent (fresh context).',
+      maxIterations: 1,
+      runId,
+      priorMessages: [
+        { role: 'user', content: 'Scaffold, implement the core parser, and wire up the CLI' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'p1',
+              type: 'function',
+              function: {
+                name: 'update_plan',
+                arguments: JSON.stringify({
+                  steps: [
+                    { text: stepTexts.done, status: 'completed' },
+                    { text: stepTexts.inProgress, status: 'in_progress' },
+                    { text: stepTexts.pending, status: 'pending' }
+                  ]
+                })
+              }
+            }
+          ]
+        },
+        { role: 'tool', tool_call_id: 'p1', content: 'plan updated (1/3 completed). Keep statuses current as you work.' }
+      ] as any
+    });
+
+    expect(pass2.reply).toContain('Resuming at');
+
+    // The very first LLM request of pass 2 must carry the durable ledger block
+    // — with step 1 marked completed, step 2 in-progress, and the next_action
+    // line pointing at step 2 — so the model cannot "start from the beginning".
+    const body = activeMock.receivedBodies[0];
+    expect(body).toContain('<<<TASK_LEDGER');
+    expect(body).toContain('>>>TASK_LEDGER');
+    expect(body).toContain(stepTexts.done);
+    expect(body).toContain(stepTexts.inProgress);
+    expect(body).toContain(stepTexts.pending);
+    expect(body).toContain(stepTexts.inProgress); // in the next_action line too
+  });
+
   it('without a runId the ledger machinery stays dormant (no files, no block)', async () => {
     const freshRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ocas-ledger-dormant-'));
     activeMock = await startMockOllama([
