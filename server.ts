@@ -546,6 +546,23 @@ Return ONLY a JSON array, no prose: [{"key": "short-name", "value": "the fact", 
   res.json({ success: true, items: extracted, longTermMemories: visibleMemoryList(scope) });
 });
 
+// P7.4 item 3: past-run RAG — "last time we did X, the fix was Y".
+// Searches this workspace's compaction transcripts, task ledgers and run
+// snapshots/logs. Embeddings when available, keyword fallback otherwise.
+app.post('/api/memory/rag/search', async (req: Request, res: Response) => {
+  const { sessionId = 'default', query, k } = req.body || {};
+  if (!query || typeof query !== 'string') {
+    return res.status(400).json({ error: 'query (string) is required' });
+  }
+  const ws = getWorkspaceRoot(sessionId);
+  try {
+    const { chunks, mode } = await retrievePastRuns(ws, query, Math.max(1, Math.min(Number(k) || 6, 12)));
+    res.json({ query, mode, count: chunks.length, chunks, rendered: renderPastRuns(chunks, mode) });
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
+});
+
 // Models endpoint
 
 app.get('/api/models', (req: Request, res: Response) => {
@@ -1100,6 +1117,7 @@ import type { LoopEvent } from './server/agentLoop';
 import { computeDiffsForFiles, computeCheckpointDiffs } from './server/diffUtil';
 import { loadProjectConfig, saveProjectConfig, loadProjectInstructions, ProjectConfig } from './server/projectConfig';
 import { retrieveCode, renderRetrieval } from './server/codeRetrieval';
+import { retrievePastRuns, renderPastRuns } from './server/runRag';
 import { buildRepoMap } from './server/repoMap';
 import { getOrCreateToken, createLanGate, lanAddresses } from './server/lanAccess';
 import { findModelPreset, MODEL_PRESETS } from './server/modelMatrix';
@@ -1758,6 +1776,12 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
         }
       } catch {}
       return { ok: true };
+    },
+    // P7.4 item 3: search_past_runs — RAG over this workspace's past-run artifacts
+    searchPastRuns: async (query: string, k?: number) => {
+      const ws = getWorkspaceRoot(sessionId);
+      const { chunks, mode } = await retrievePastRuns(ws, query, Math.min(k || 6, 12));
+      return renderPastRuns(chunks, mode);
     },
     // P3.3: read-only explore subagent (own iteration budget, cannot edit)
     runSubagent: async (question: string) => {

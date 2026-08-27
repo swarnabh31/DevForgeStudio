@@ -99,6 +99,12 @@ export interface ExecuteToolOptions {
     tags?: string[];
     scope?: string;
   }) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * P7.4 item 3: enables the `search_past_runs` tool — RAG over this
+   * workspace's past-run transcripts/ledgers/snapshots. Returns a rendered
+   * tool-result body ("last time we did X, the fix was Y").
+   */
+  searchPastRuns?: (query: string, k?: number) => Promise<string>;
   /** P5.3: user-defined plugin tools (see server/pluginTools.ts) */
   pluginTools?: PluginRuntimeTool[];
 }
@@ -210,13 +216,18 @@ export interface AgentLoopOptions {
    * P7.4 item 1: enables the `remember` tool (persist a durable fact/convention
    * into scoped long-term memory). See ExecuteToolOptions.
    */
-  remember?: (args: {
-    category: string;
-    key: string;
-    value: string;
-    tags?: string[];
-    scope?: string;
-  }) => Promise<{ ok: boolean; error?: string }>;
+   remember?: (args: {
+     category: string;
+     key: string;
+     value: string;
+     tags?: string[];
+     scope?: string;
+   }) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * P7.4 item 3: enables the `search_past_runs` tool (RAG over this
+   * workspace's past-run artifacts). See ExecuteToolOptions.
+   */
+  searchPastRuns?: (query: string, k?: number) => Promise<string>;
   /** P5.3: user-defined plugin tools (see server/pluginTools.ts) */
   pluginTools?: PluginRuntimeTool[];
   /**
@@ -516,12 +527,31 @@ const REMEMBER_SCHEMA: any = {
   }
 };
 
-function toolSchemas(opts: { semanticSearch?: unknown; runSubagent?: unknown; pluginTools?: PluginRuntimeTool[]; queryMemories?: unknown; remember?: unknown }) {
+/** P7.4 item 3: search_past_runs — RAG over past-run artifacts (only when wired). */
+const SEARCH_PAST_RUNS_SCHEMA: any = {
+  type: 'function',
+  function: {
+    name: 'search_past_runs',
+    description:
+      'Search this workspace\'s PAST RUNS (compaction transcripts, task ledgers, run snapshots/logs) by meaning. Use it when the question is "what did we do/try/decide last time with X?" or "what was the fix for bug Y earlier?" — it surfaces "last time we did X, the fix was Y" hints without re-investigating. For durable facts/conventions use `recall` instead; for the live codebase use `semantic_search`.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'What past work to find, e.g. "csv import crash fix" or "how we restructured the auth middleware"' },
+        k: { type: 'number', description: 'Max results (default 6, max 12)' }
+      },
+      required: ['query']
+    }
+  }
+};
+
+function toolSchemas(opts: { semanticSearch?: unknown; runSubagent?: unknown; pluginTools?: PluginRuntimeTool[]; queryMemories?: unknown; remember?: unknown; searchPastRuns?: unknown }) {
   const extra = [
     ...(opts.semanticSearch ? [SEMANTIC_SEARCH_SCHEMA] : []),
     ...(opts.runSubagent ? [DELEGATE_RESEARCH_SCHEMA] : []),
     ...(opts.queryMemories ? [RECALL_SCHEMA] : []),
     ...(opts.remember ? [REMEMBER_SCHEMA] : []),
+    ...(opts.searchPastRuns ? [SEARCH_PAST_RUNS_SCHEMA] : []),
     ...(opts.pluginTools || []).map((t) => t.schema)
   ];
   return extra.length ? [...TOOL_SCHEMAS, ...extra] : TOOL_SCHEMAS;
@@ -940,6 +970,25 @@ async function executeToolInner(
           return { callId: call.id, name: call.name, ok: false, content: `ERROR: remember failed — ${r.error || 'unknown'}` };
         }
         return { callId: call.id, name: call.name, ok: true, content: 'Recorded (durable). It will survive compaction and be available to future sessions via recall.' };
+      }
+
+      // P7.4 item 3: RAG over past-run artifacts (only wired when options.searchPastRuns set)
+      case 'search_past_runs': {
+        if (!options.searchPastRuns) {
+          return { callId: call.id, name: call.name, ok: false, content: 'ERROR: search_past_runs unavailable in this run' };
+        }
+        const k = Math.min(Number(call.arguments.k) || 6, 12);
+        try {
+          const body = await options.searchPastRuns(String(call.arguments.query || ''), k);
+          return { callId: call.id, name: call.name, ok: true, content: body || '(no past-run matches)' };
+        } catch (err: any) {
+          return {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: `ERROR: search_past_runs failed — ${String(err?.message || err)}`
+          };
+        }
       }
 
       case 'write_file': {
@@ -1567,6 +1616,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     runSubagent: opts.runSubagent,
     queryMemories: opts.queryMemories,
     remember: opts.remember,
+    searchPastRuns: opts.searchPastRuns,
     pluginTools: opts.pluginTools,
     get backupDir() {
       if (!lazyBackupDir) {

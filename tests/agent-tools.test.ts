@@ -164,3 +164,39 @@ describe('executeTool: recall & remember (scoped memory tools)', () => {
     expect(r.content).toContain('disk full');
   });
 });
+
+// P7.4 item 3: search_past_runs (only active when the backend is wired)
+describe('executeTool: search_past_runs (past-run RAG tool)', () => {
+  it('fails gracefully when no backend is wired', async () => {
+    const r = await executeTool(root, call('search_past_runs', { query: 'any' }));
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain('unavailable');
+  });
+
+  it('passes query through and caps k at 12', async () => {
+    const r = await executeTool(
+      root,
+      call('search_past_runs', { query: 'csv crash fix', k: 99 }),
+      { searchPastRuns: async (q, k) => `RUNS for "${q}" (k=${k})` }
+    );
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('csv crash fix');
+    expect(r.content).toContain('k=12'); // capped by the tool to <=12
+  });
+
+  it('reports an empty result as no-matches', async () => {
+    const r = await executeTool(root, call('search_past_runs', { query: 'x' }), { searchPastRuns: async () => '' });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('no past-run matches');
+  });
+
+  it('propagates backend failure as a tool error', async () => {
+    const r = await executeTool(
+      root,
+      call('search_past_runs', { query: 'x' }),
+      { searchPastRuns: async () => { throw new Error('index corrupted'); } }
+    );
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain('index corrupted');
+  });
+});
