@@ -31,3 +31,17 @@
 {"ts":"2026-08-26T12:32:00.207Z","mode":"mock","commit":"740b69d","total":25,"passed":25,"failed":0,"errors":0,"passRate":1,"failures":[]}
 {"ts":"2026-08-26T12:44:58.550Z","mode":"mock","commit":"740b69d","total":20,"passed":20,"failed":0,"errors":0,"passRate":1,"failures":[]}
 {"ts":"2026-08-26T12:56:56.852Z","mode":"mock","commit":"740b69d","total":20,"passed":20,"failed":0,"errors":0,"passRate":1,"failures":[]}
+{"ts":"2026-08-27T05:29:24.698Z","mode":"mock","commit":"325177f","total":20,"passed":20,"failed":0,"errors":0,"passRate":1,"failures":[]}
+{"ts":"2026-08-27T05:48:26.694Z","mode":"mock","commit":"325177f","total":20,"passed":20,"failed":0,"errors":0,"passRate":1,"failures":[]}
+{"ts":"2026-08-27T06:07:22.595Z","mode":"mock","commit":"325177f","total":20,"passed":20,"failed":0,"errors":0,"passRate":1,"failures":[]}
+{"ts":"2026-08-27T06:18:09.603Z","mode":"mock","commit":"325177f","total":1,"passed":0,"failed":0,"errors":1,"passRate":0,"failures":["tricky-compaction-survival"]}
+{"ts":"2026-08-27T06:28:24.469Z","mode":"mock","commit":"325177f","total":1,"passed":0,"failed":1,"errors":0,"passRate":0,"failures":["tricky-compaction-survival"]}
+{"ts":"2026-08-27T06:29:25.189Z","mode":"mock","commit":"325177f","total":1,"passed":0,"failed":1,"errors":0,"passRate":0,"failures":["tricky-compaction-survival"]}
+{"ts":"2026-08-27T06:33:15.906Z","mode":"mock","commit":"325177f","total":1,"passed":0,"failed":0,"errors":1,"passRate":0,"failures":["tricky-compaction-survival"]}
+{"ts":"2026-08-27T06:33:30.949Z","mode":"mock","commit":"325177f","total":1,"passed":0,"failed":0,"errors":1,"passRate":0,"failures":["tricky-compaction-survival"]}
+{"ts":"2026-08-27T06:59:11.941Z","mode":"mock","commit":"325177f","total":1,"passed":0,"failed":0,"errors":1,"passRate":0,"failures":["tricky-compaction-survival"]}
+{"ts":"2026-08-27T07:02:49.356Z","mode":"mock","commit":"325177f","total":1,"passed":0,"failed":1,"errors":0,"passRate":0,"failures":["tricky-compaction-survival"]}
+{"ts":"2026-08-27T07:03:16.808Z","mode":"mock","commit":"325177f","total":1,"passed":0,"failed":1,"errors":0,"passRate":0,"failures":["tricky-compaction-survival"]}
+{"ts":"2026-08-27T07:10:04.532Z","mode":"mock","commit":"325177f","total":1,"passed":1,"failed":0,"errors":0,"passRate":1,"failures":[]}
+{"ts":"2026-08-27T07:10:20.243Z","mode":"mock","commit":"325177f","total":21,"passed":21,"failed":0,"errors":0,"passRate":1,"failures":[]}
+{"ts":"2026-08-27T07:11:13.766Z","mode":"mock","commit":"325177f","total":21,"passed":21,"failed":0,"errors":0,"passRate":1,"failures":[]}

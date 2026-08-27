@@ -214,6 +214,116 @@ describe('compactWithSummary', () => {
     ).toBe(0);
     expect(JSON.stringify(many)).toBe(snapshot);
   });
+
+  // P7.4 non-lossy compaction: full verbatim transcript is persisted before the
+  // digested turns are replaced, and the digest points the agent back to it.
+
+  function manyTurns(): CompactionMessage[] {
+    return [
+      { role: 'system', content: 's' },
+      ...Array.from({ length: 5 }, (_, i): CompactionMessage[] => [
+        { role: 'user', content: `t${i} - user marker ${i}` },
+        { role: 'assistant', content: `a${i} - asst marker ${i}` }
+      ]).flat()
+    ];
+  }
+
+  it('writes the full verbatim transcript to .opencode/memory and points the digest at it', async () => {
+    activeMock = await startMock([]);
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ocas-nonlossy-'));
+    try {
+      const messages = manyTurns();
+      const digested = await compactWithSummary(messages, {
+        endpoint: `http://127.0.0.1:${activeMock.port}`,
+        modelId: 'm',
+        keepRecentTurns: 2,
+        root: ws,
+        runId: 'run-xyz/1'
+      });
+      expect(digested).toBe(3);
+      const file = path.join(ws, '.opencode', 'memory', 'run-xyz_1-c1.md');
+      expect(fs.existsSync(file)).toBe(true);
+      const body = fs.readFileSync(file, 'utf-8');
+      // Every digested message content survives verbatim on disk
+      for (let i = 0; i < 3; i++) {
+        expect(body).toContain(`t${i} - user marker ${i}`);
+        expect(body).toContain(`a${i} - asst marker ${i}`);
+      }
+      expect(body).toContain('# Conversation transcript — run-xyz_1 (compaction 1)');
+      // Keeps system + recent turns, with a pointer inside the digest marker
+      expect(messages[0].content).toBe('s');
+      expect(messages[messages.length - 1].content).toBe('a4 - asst marker 4');
+      const digestMsg = messages.find((m) => m.role === 'user' && m.content.includes('CONVERSATION DIGEST'))!;
+      expect(digestMsg.content).toContain('read_file .opencode/memory/run-xyz_1-c1.md');
+      expect(digestMsg.content).toMatch(/\(\d+ chars\)/);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('numbers repeated compactions sequentially so no transcript overwrites its predecessor', async () => {
+    activeMock = await startMock([]);
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ocas-nonlossy-seq-'));
+    try {
+      for (let i = 0; i < 2; i++) {
+        const messages = manyTurns();
+        await compactWithSummary(messages, {
+          endpoint: `http://127.0.0.1:${activeMock.port}`,
+          modelId: 'm',
+          keepRecentTurns: 2,
+          root: ws,
+          runId: 'r-seq'
+        });
+      }
+      const files = fs.readdirSync(path.join(ws, '.opencode', 'memory')).sort();
+      expect(files).toEqual(['r-seq-c1.md', 'r-seq-c2.md']);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('writes no transcript and keeps the plain digest when root/runId is not provided', async () => {
+    activeMock = await startMock([]);
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ocas-nodir-'));
+    try {
+      const messages = manyTurns();
+      await compactWithSummary(messages, {
+        endpoint: `http://127.0.0.1:${activeMock.port}`,
+        modelId: 'm',
+        keepRecentTurns: 2
+      });
+      expect(fs.existsSync(path.join(ws, '.opencode'))).toBe(false);
+      const digestMsg = messages.find((m) => m.role === 'user' && m.content.includes('CONVERSATION DIGEST'))!;
+      expect(digestMsg.content).not.toContain('read_file');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to a plain digest when the transcript cannot be written to disk', async () => {
+    activeMock = await startMock([]);
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ocas-nonlossy-block-'));
+    try {
+      // Block the destination cross-platform: .opencode is a regular file,
+      // so .opencode/memory can never be created.
+      fs.writeFileSync(path.join(ws, '.opencode'), 'not a directory');
+      const messages = manyTurns();
+      const digested = await compactWithSummary(messages, {
+        endpoint: `http://127.0.0.1:${activeMock.port}`,
+        modelId: 'm',
+        keepRecentTurns: 2,
+        root: ws,
+        runId: 'r1'
+      });
+      expect(digested).toBe(3);
+      const digestMsg = messages.find((m) => m.role === 'user' && m.content.includes('CONVERSATION DIGEST'))!;
+      expect(digestMsg.content).not.toContain('read_file ');
+      // Blocked file untouched
+      expect(fs.readFileSync(path.join(ws, '.opencode'), 'utf-8')).toBe('not a directory');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------- loop integration ----------------

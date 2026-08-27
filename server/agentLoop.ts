@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { execFile, exec } from 'child_process';
+import { exec, spawn, type ChildProcess } from 'child_process';
 import {
   walkWorkspace,
   readFileRange,
@@ -52,6 +52,11 @@ export interface ToolResult {
 
 export interface ExecuteToolOptions {
   signal?: AbortSignal;
+  /**
+   * P7.1: per-call execution budget in ms. When omitted, per-tool defaults
+   * apply (see DEFAULT_TOOL_TIMEOUT_MS / SUBAGENT_TOOL_BUDGET_MS).
+   */
+  timeoutMs?: number;
   /** Directory where pre-edit snapshots are stored (Phase 3 safety net). */
   backupDir?: string;
   /**
@@ -78,6 +83,22 @@ export interface ExecuteToolOptions {
   semanticSearch?: (query: string, k?: number) => Promise<string>;
   /** P3.3: enables the `delegate_research` tool (read-only explore subagent). */
   runSubagent?: (question: string) => Promise<string>;
+  /**
+   * P7.4 item 1: enables the `recall` tool — look up scoped long-term memories
+   * for the current workspace. Returns a rendered tool-result body.
+   */
+  queryMemories?: (query: string, k?: number) => Promise<string>;
+  /**
+   * P7.4 item 1: enables the `remember` tool — persist a durable fact/convention
+   * into scoped long-term memory. Returns { ok, error? }.
+   */
+  remember?: (args: {
+    category: string;
+    key: string;
+    value: string;
+    tags?: string[];
+    scope?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
   /** P5.3: user-defined plugin tools (see server/pluginTools.ts) */
   pluginTools?: PluginRuntimeTool[];
 }
@@ -137,6 +158,11 @@ export interface AgentLoopOptions {
   systemContext: string; // rules + memory + workspace index (pre-built by caller)
   maxIterations?: number;
   signal?: AbortSignal;
+  /**
+   * P7.1: default per-tool-call execution budget in ms (override per call via
+   * ExecuteToolOptions.timeoutMs). Omitted means built-in per-tool defaults.
+   */
+  toolTimeoutMs?: number;
   sampling?: { temperature: number; topP: number; repeatPenalty: number; numCtxTokens: number };
   /** 'none' appends the qwen3 /no_think soft switch and strips <think> blocks */
   thinkingLevel?: 'none' | 'low' | 'medium' | 'high';
@@ -174,7 +200,23 @@ export interface AgentLoopOptions {
    * P3.3: enables the `delegate_research` tool. Spawns a read-only explore
    * subagent; its compact report is returned as this tool's result.
    */
-  runSubagent?: (question: string) => Promise<string>;
+    runSubagent?: (question: string) => Promise<string>;
+  /**
+   * P7.4 item 1: enables the `recall` tool (query scoped long-term memories for
+   * this run's workspace). See ExecuteToolOptions.
+   */
+  queryMemories?: (query: string, k?: number) => Promise<string>;
+  /**
+   * P7.4 item 1: enables the `remember` tool (persist a durable fact/convention
+   * into scoped long-term memory). See ExecuteToolOptions.
+   */
+  remember?: (args: {
+    category: string;
+    key: string;
+    value: string;
+    tags?: string[];
+    scope?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
   /** P5.3: user-defined plugin tools (see server/pluginTools.ts) */
   pluginTools?: PluginRuntimeTool[];
   /**
@@ -435,10 +477,51 @@ const DELEGATE_RESEARCH_SCHEMA: any = {
   }
 };
 
-function toolSchemas(opts: { semanticSearch?: unknown; runSubagent?: unknown; pluginTools?: PluginRuntimeTool[] }) {
+/** P7.4 item 1: recall — query scoped long-term memories (only when wired). */
+const RECALL_SCHEMA: any = {
+  type: 'function',
+  function: {
+    name: 'recall',
+    description:
+      'Search cross-session long-term project memories (decisions, conventions, persistent facts for this workspace + useful global facts). Use it BEFORE re-doing work you may have done on a previous session, or when a "how/where does X work?" question could already be answered from a past run. Returns the top-matching memory entries.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'What you want to remember, e.g. "how do we name migration files" or "what is the build command"' },
+        k: { type: 'number', description: 'Max results (default 6, max 12)' }
+      },
+      required: ['query']
+    }
+  }
+};
+
+/** P7.4 item 1: remember — persist a durable fact (only when wired). */
+const REMEMBER_SCHEMA: any = {
+  type: 'function',
+  function: {
+    name: 'remember',
+    description:
+      'Persist a durable project fact, convention, or decision into cross-session memory so it survives compaction and future runs. Use it when you learn something non-obvious that a future session would benefit from (project-specific test commands, architecture invariants, user preferences, a bug we keep re-hitting). Do NOT use for transient or task-specific info.',
+    parameters: {
+      type: 'object',
+      properties: {
+        category: { type: 'string', description: 'convention | fact | architecture | preference | bug_note', enum: ['convention', 'fact', 'architecture', 'preference', 'bug_note'] },
+        key: { type: 'string', description: 'Short identifier (snake_case), e.g. "lint_command" or "naming_migration"' },
+        value: { type: 'string', description: 'The durable value — the exact command, the convention text, the architectural note' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Free-form tags for scoped retrieval boosts, e.g. ["npm", "ci"]' },
+        scope: { type: 'string', description: 'Optional. "global" for cross-project facts (default), or a workspace path for project-local facts.' }
+      },
+      required: ['key', 'value']
+    }
+  }
+};
+
+function toolSchemas(opts: { semanticSearch?: unknown; runSubagent?: unknown; pluginTools?: PluginRuntimeTool[]; queryMemories?: unknown; remember?: unknown }) {
   const extra = [
     ...(opts.semanticSearch ? [SEMANTIC_SEARCH_SCHEMA] : []),
     ...(opts.runSubagent ? [DELEGATE_RESEARCH_SCHEMA] : []),
+    ...(opts.queryMemories ? [RECALL_SCHEMA] : []),
+    ...(opts.remember ? [REMEMBER_SCHEMA] : []),
     ...(opts.pluginTools || []).map((t) => t.schema)
   ];
   return extra.length ? [...TOOL_SCHEMAS, ...extra] : TOOL_SCHEMAS;
@@ -478,6 +561,188 @@ export function isCommandAllowed(command: string): { ok: boolean; reason?: strin
 
 // ---------------- Tool execution ----------------
 
+// ---------------- P7.1: parallel-safe classification + execution guard ----------------
+
+/**
+ * P7.1: tools that are pure and state-free — safe to run as a concurrent
+ * batch. Deliberately narrow: `read_file` records mtimes (E5 conflict
+ * detector), `semantic_search` maintains an index, `delegate_research`
+ * spawns a subagent, and everything else mutates state. Keep it this way.
+ */
+export const PARALLEL_SAFE_TOOLS = new Set(['list_files', 'search', 'file_outline']);
+
+export function isReadOnlyParallelTool(name: string): boolean {
+  return PARALLEL_SAFE_TOOLS.has(name);
+}
+
+/** Default per-call budget for ordinary built-in tools. */
+export const DEFAULT_TOOL_TIMEOUT_MS = 10000;
+/** delegate_research / semantic_search run their own long work — 20 min budget. */
+export const SUBAGENT_TOOL_BUDGET_MS = 1200000;
+
+export function toolTimeoutFor(name: string, options: ExecuteToolOptions): number {
+  if (options.timeoutMs && options.timeoutMs > 0) return options.timeoutMs;
+  if (name === 'delegate_research' || name === 'semantic_search') return SUBAGENT_TOOL_BUDGET_MS;
+  return DEFAULT_TOOL_TIMEOUT_MS;
+}
+
+/** Shell child processes are tracked so a guard abort can kill them directly. */
+let activeShellChildren: Set<ChildProcess> | null = null;
+export function __activeShellChildren(): Set<ChildProcess> {
+  if (!activeShellChildren) activeShellChildren = new Set();
+  return activeShellChildren;
+}
+
+/**
+ * P7.1: run `run` under a per-call budget AND an abort signal. The guard
+ * WINS the race at the first of {work done, budget, abort} — so even a tool
+ * that ignores its input (like a plain plugin callback) is cut off at the
+ * deadline or on cancel, and any tracked shell child is killed to free the
+ * process. Callers (Promise.allSettled batches) always get a settled result.
+ */
+function withToolGuard(
+  callId: string,
+  callName: string,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  run: () => Promise<ToolResult>
+): Promise<ToolResult> {
+  const fail = (content: string): ToolResult => ({ callId, name: callName, ok: false, content });
+  let child: ChildProcess | undefined;
+  const killChild = () => {
+    if (!child) return;
+    try { child.kill('SIGTERM'); } catch { /* already dead */ }
+    setTimeout(() => { try { child!.kill('SIGKILL'); } catch { /* already dead */ } }, 250).unref();
+  };
+
+  if (signal && signal.aborted) {
+    return Promise.resolve(fail('ERROR: cancelled — run aborted before this call started.'));
+  }
+
+  let timer: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<ToolResult>((resolve) => {
+    timer = setTimeout(() => {
+      killChild();
+      resolve(fail(
+        `ERROR: ${callName} exceeded its ${timeoutMs}ms time budget (timed out). ` +
+        'Try a smaller scope, or move on and note it as blocked.'
+      ));
+    }, timeoutMs);
+  });
+
+  let resolveAbort: ((r: ToolResult) => void) | undefined;
+  const abortPromise = signal
+    ? new Promise<ToolResult>((resolve) => {
+        resolveAbort = resolve;
+      })
+    : null;
+
+  const onAbort = () => {
+    killChild();
+    resolveAbort?.(fail('ERROR: cancelled — the run was aborted while this call was in flight.'));
+  };
+  if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+  const work = run().catch((err: any) => toolError(callName, callId, err));
+
+  return Promise.race([work, timeoutPromise, ...(abortPromise ? [abortPromise] : [])]).finally(() => {
+    if (timer) clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  });
+}
+
+/**
+ * P7.1: `exec` with the child tracked for abort-kill. Keeps the old
+ * (err, stdout, stderr) callback semantics verbatim.
+ */
+function spawnShellCommandTracked(
+  command: string,
+  opts: { cwd: string; timeout?: number; maxBuffer?: number },
+  cb: (err: { code?: number; message: string } | null, stdout: string, stderr: string) => void
+): void {
+  const child = spawn(command, {
+    cwd: opts.cwd,
+    shell: true,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  __activeShellChildren().add(child);
+  const cleanup = () => __activeShellChildren().delete(child);
+  const t = opts.timeout ? setTimeout(() => {
+    try { child.kill('SIGTERM'); } catch { }
+    setTimeout(() => { try { child.kill('SIGKILL'); } catch { } }, 2000).unref();
+  }, opts.timeout) : undefined;
+  const max = opts.maxBuffer ?? 8 * 1024 * 1024;
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (b: Buffer) => { if (stdout.length < max) stdout += b.toString('utf8'); });
+  child.stderr.on('data', (b: Buffer) => { if (stderr.length < max) stderr += b.toString('utf8'); });
+  child.on('error', (err: NodeJS.ErrnoException) => {
+    if (t) clearTimeout(t);
+    cleanup();
+    cb(null, '', err.message);
+  });
+  child.on('close', (code: number | null) => {
+    if (t) clearTimeout(t);
+    cleanup();
+    const err = code === 0 ? null : { code: code ?? 1, message: `exit ${code}` };
+    cb(err, stdout.slice(0, max), stderr.slice(0, max));
+  });
+}
+
+/** P7.1: `execFile` variant for direct binaries (git), same tracking. */
+function spawnExecFileSyncTracked(
+  file: string,
+  args: string[],
+  opts: { cwd: string; timeout?: number; maxBuffer?: number },
+  cb: (err: { code?: number; message: string } | null, stdout: string) => void
+): void {
+  const child = spawn(file, args, {
+    cwd: opts.cwd,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  __activeShellChildren().add(child);
+  const cleanup = () => __activeShellChildren().delete(child);
+  const t = opts.timeout ? setTimeout(() => {
+    try { child.kill('SIGTERM'); } catch { }
+    setTimeout(() => { try { child.kill('SIGKILL'); } catch { } }, 2000).unref();
+  }, opts.timeout) : undefined;
+  const max = opts.maxBuffer ?? 4 * 1024 * 1024;
+  let out = '';
+  child.stdout.on('data', (b: Buffer) => { if (out.length < max) out += b.toString('utf8'); });
+  child.on('error', (err: NodeJS.ErrnoException) => {
+    if (t) clearTimeout(t);
+    cleanup();
+    cb(null, out);
+  });
+  child.on('close', (code: number | null) => {
+    if (t) clearTimeout(t);
+    cleanup();
+    const err = code === 0 ? null : { code: code ?? 1, message: `exit ${code}` };
+    cb(err, out.slice(0, max));
+  });
+}
+
+function shellOutcome(
+  callId: string,
+  callName: string,
+  cbErr: { code?: number; message: string } | null,
+  stdout: string,
+  stderr: string,
+  maxSlice: number
+): ToolResult {
+  const code = typeof (cbErr as any)?.code === 'number' ? (cbErr as any).code : cbErr ? 1 : 0;
+  const out = [stdout, stderr].filter(Boolean).join('\n--- stderr ---\n').slice(0, maxSlice);
+  return {
+    callId,
+    name: callName,
+    ok: code === 0,
+    content: `exit=${code}\n${out || '(no output)'}`
+  };
+}
+// ---------------- end P7.1 helpers ----------------
+
 function toolError(name: string, callId: string, err: unknown): ToolResult {
   const msg = err instanceof PathTraversalError
     ? `BLOCKED: ${err.message}`
@@ -486,6 +751,17 @@ function toolError(name: string, callId: string, err: unknown): ToolResult {
 }
 
 export async function executeTool(
+  root: string,
+  call: ToolCall,
+  options: ExecuteToolOptions = {}
+): Promise<ToolResult> {
+  // P7.1: public entry — every invocation goes through the per-call guard.
+  return withToolGuard(call.id, call.name, toolTimeoutFor(call.name, options), options.signal, () =>
+    executeToolInner(root, call, options)
+  );
+}
+
+async function executeToolInner(
   root: string,
   call: ToolCall,
   options: ExecuteToolOptions = {}
@@ -616,6 +892,54 @@ export async function executeTool(
             content: `ERROR: subagent failed — ${String(err?.message || err)}; investigate yourself with search/read_file.`
           };
         }
+      }
+
+      // P7.4 item 1: query scoped long-term memories (only wired when options.queryMemories set)
+      case 'recall': {
+        if (!options.queryMemories) {
+          return { callId: call.id, name: call.name, ok: false, content: 'ERROR: recall tool unavailable in this run' };
+        }
+        const k = Math.min(Number(call.arguments.k) || 6, 12);
+        try {
+          const body = await options.queryMemories(String(call.arguments.query || ''), k);
+          return { callId: call.id, name: call.name, ok: true, content: body || '(no matching memories)' };
+        } catch (err: any) {
+          return {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: `ERROR: recall failed — ${String(err?.message || err)}`
+          };
+        }
+      }
+
+      // P7.4 item 1: persist a durable fact/convention scoped to this run's workspace
+      case 'remember': {
+        if (!options.remember) {
+          return { callId: call.id, name: call.name, ok: false, content: 'ERROR: remember tool unavailable in this run' };
+        }
+        const key = String(call.arguments.key || '').trim();
+        const value = String(call.arguments.value || '').trim();
+        if (!key || !value) {
+          return { callId: call.id, name: call.name, ok: false, content: 'ERROR: remember requires both key and value' };
+        }
+        const rawTags = call.arguments.tags;
+        const tags = Array.isArray(rawTags)
+          ? rawTags.map((t) => String(t)).filter((t) => t.trim()).slice(0, 8)
+          : typeof rawTags === 'string' && rawTags.trim()
+            ? rawTags.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 8)
+            : undefined;
+        const r = await options.remember({
+          category: String(call.arguments.category || 'fact'),
+          key: key.slice(0, 120),
+          value: value.slice(0, 800),
+          tags,
+          scope: call.arguments.scope
+        });
+        if (!r.ok) {
+          return { callId: call.id, name: call.name, ok: false, content: `ERROR: remember failed — ${r.error || 'unknown'}` };
+        }
+        return { callId: call.id, name: call.name, ok: true, content: 'Recorded (durable). It will survive compaction and be available to future sessions via recall.' };
       }
 
       case 'write_file': {
@@ -765,42 +1089,40 @@ export async function executeTool(
             content: `ERROR: command rejected — ${check.reason}`
           };
         }
+        // P7.1: tracked spawn so the guard's abort can kill the shell child.
         return await new Promise<ToolResult>((resolve) => {
-          exec(
+          spawnShellCommandTracked(
             command,
-            { cwd: root, timeout: 120000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+            { cwd: root, timeout: 120000, maxBuffer: 8 * 1024 * 1024 },
             (err, stdout, stderr) => {
-              const code = (err as any)?.code;
-              const exitCode = typeof code === 'number' ? code : err ? 1 : 0;
-              const out = [stdout, stderr].filter(Boolean).join('\n--- stderr ---\n').slice(0, 8000);
-              resolve({
-                callId: call.id,
-                name: call.name,
-                ok: exitCode === 0,
-                content: `exit=${exitCode}\n${out || '(no output)'}`
-              });
+              resolve(
+                shellOutcome(call.id, call.name, err, stdout, stderr, 8000)
+              );
             }
           );
         });
       }
 
       case 'git_diff': {
+        // P7.1: tracked spawn so the guard's abort can kill the child.
         return await new Promise<ToolResult>((resolve) => {
-          execFile('git', ['diff'], { cwd: root, maxBuffer: 4 * 1024 * 1024, timeout: 15000 }, (err, stdout) => {
-            if (err && !stdout) {
-              resolve({ callId: call.id, name: call.name, ok: false, content: `ERROR: ${err.message}` });
-            } else {
-              resolve({
-                callId: call.id,
-                name: call.name,
-                ok: true,
-                content: stdout.slice(0, 16000) || '(no unstaged changes)'
-              });
+          spawnExecFileSyncTracked(
+            'git',
+            ['diff'],
+            { cwd: root, maxBuffer: 4 * 1024 * 1024, timeout: 15000 },
+            (err, stdout) => {
+              if (err && !stdout) {
+                resolve({ callId: call.id, name: call.name, ok: false, content: `ERROR: ${err.message}` });
+              } else {
+                resolve({
+                  callId: call.id,
+                  name: call.name,
+                  ok: true,
+                  content: stdout.slice(0, 16000) || '(no unstaged changes)'
+                });
+              }
             }
-          });
-          if (signal?.aborted) {
-            resolve({ callId: call.id, name: call.name, ok: false, content: 'ERROR: cancelled' });
-          }
+          );
         });
       }
 
@@ -1124,6 +1446,34 @@ async function consumeOllamaStream(
       }
     }
   }
+  // Epilogue: some servers close the stream without a trailing newline (and
+  // eval mocks send one complete JSON document). Process the leftover so a
+  // well-formed final line is never dropped.
+  if (buffer) {
+    const line = buffer.trim();
+    if (line) {
+      try {
+        const evt = JSON.parse(line);
+        const delta = evt?.message?.content;
+        if (typeof delta === 'string' && delta) {
+          content += delta;
+          onToken(delta);
+        }
+        if (Array.isArray(evt?.message?.tool_calls) && evt.message.tool_calls.length) {
+          toolCalls = evt.message.tool_calls.map((tc: any, i: number) => ({
+            id: `ollama-${Date.now()}-${i}`,
+            name: tc.function?.name,
+            arguments:
+              typeof tc.function?.arguments === 'string'
+                ? safeJsonParse(tc.function.arguments)
+                : tc.function?.arguments || {}
+          }));
+        }
+      } catch {
+        /* trailing partial data — ignore */
+      }
+    }
+  }
   return { content, toolCalls };
 }
 
@@ -1200,6 +1550,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   let lazyBackupDir: string | undefined;
   const toolOpts: ExecuteToolOptions = {
     signal: opts.signal,
+    // P7.1: run-level default; the guard applies per-tool budgets inside
+    timeoutMs: opts.toolTimeoutMs,
     verifyEdit: opts.verifyEdit,
     validateEdit: opts.validateEdit,
     onPlanUpdate: (steps) => {
@@ -1213,6 +1565,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     runId: opts.runId,
     semanticSearch: opts.semanticSearch,
     runSubagent: opts.runSubagent,
+    queryMemories: opts.queryMemories,
+    remember: opts.remember,
     pluginTools: opts.pluginTools,
     get backupDir() {
       if (!lazyBackupDir) {
@@ -1261,7 +1615,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
             endpoint: opts.endpoints[0],
             modelId: opts.modelId,
             signal: opts.signal,
-            keepRecentTurns: opts.compactionKeepTurns ?? 4
+            keepRecentTurns: opts.compactionKeepTurns ?? 4,
+            // P7.4: keep compaction non-lossy — full verbatim goes to
+            // .opencode/memory/<runId>-<n>.md and the digest points at it.
+            ...(opts.runId ? { root: opts.root, runId: opts.runId } : {})
           });
         } catch {
           turnsDigested = 0;
@@ -1408,9 +1765,18 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         : {})
     });
 
-    for (let callIndex = 0; callIndex < llm.toolCalls.length; callIndex++) {
-      let call = llm.toolCalls[callIndex];
-      if (opts.signal?.aborted) throw new Error('cancelled');
+    // ---------------- P7.1 batch scheduler ----------------
+    // Consecutive runs of >= 2 parallel-safe tools (pure, state-free, read-only:
+    // list_files / search / file_outline) fan out CONCURRENTLY: every dispatch
+    // event is emitted before any result is awaited (Promise.allSettled), but
+    // results are recorded in model-declared order so the transcript is
+    // deterministic. Everything else — writes, patches, commands, subagents,
+    // plugins, and a lone read-only call — runs strictly sequential through
+    // runOneSequential, preserving P2.2 review gates, RE4 permission gates,
+    // and the 5x failed-call guard exactly as before.
+    const runOneSequential = async (callIn: ToolCall): Promise<boolean> => {
+      // returns true when the failed-call guard stopped the round
+      let call = callIn;
       opts.onEvent?.({ type: 'tool_call', name: call.name, arguments: call.arguments });
 
       // P2.2 diff-review gate: user accepts/rejects hunks BEFORE execution;
@@ -1433,7 +1799,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           opts.onEvent?.({ type: 'tool_result', result: fail });
           opts.onToolResult?.(fail);
           messages.push({ role: 'tool', content: fail.content, tool_call_id: call.id });
-          continue;
+          return false;
         }
         if (!reviewed) {
           const denied: ToolResult = {
@@ -1446,7 +1812,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           opts.onEvent?.({ type: 'tool_result', result: denied });
           opts.onToolResult?.(denied);
           messages.push({ role: 'tool', content: denied.content, tool_call_id: denied.callId });
-          continue;
+          return false;
         }
         call = reviewed;
       }
@@ -1456,9 +1822,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         (call.name === 'write_file' || call.name === 'apply_patch' || call.name === 'run_command') &&
         opts.requestPermission
       ) {
-        const summary = call.name === 'run_command'
-          ? String(call.arguments.command || '')
-          : `${call.name}: ${String(call.arguments.path)}`;
         const allowed = await opts.requestPermission(call.name, call.arguments);
         if (!allowed) {
           const denied: ToolResult = {
@@ -1470,7 +1833,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           toolResults.push(denied);
           opts.onToolResult?.(denied);
           messages.push({ role: 'tool', content: denied.content, tool_call_id: denied.callId });
-          continue;
+          return false;
         }
       }
 
@@ -1510,7 +1873,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
             tool_call_id: call.id
           });
           stoppedBeforeCap = true;
-          break; // exits per-call loop; next iteration asks the model to summarize
+          return true; // next iteration asks the model to summarize
         }
       } else {
         lastFailedFingerprint = '';
@@ -1538,6 +1901,71 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           (failureGuidance ? `\n${failureGuidance}` : ''),
         tool_call_id: result.callId
       });
+      return false;
+    };
+
+    {
+      const roundCalls = llm.toolCalls;
+      let roundIdx = 0;
+      while (roundIdx < roundCalls.length) {
+        if (opts.signal?.aborted) throw new Error('cancelled');
+
+        // Maximal run of parallel-safe tools starting at roundIdx.
+        let runEnd = roundIdx;
+        while (runEnd < roundCalls.length && isReadOnlyParallelTool(roundCalls[runEnd].name)) runEnd++;
+        const run = roundCalls.slice(roundIdx, runEnd);
+
+        if (run.length >= 2) {
+          // Dispatch EVERY call first (events in model order), then collect
+          // them all — this is what makes the fan-out observable and gives
+          // every call a concurrent shot at the budget.
+          for (const cl of run) {
+            opts.onEvent?.({ type: 'tool_call', name: cl.name, arguments: cl.arguments });
+          }
+          const settled = await Promise.allSettled(
+            run.map((cl) => executeTool(opts.root, cl, toolOpts))
+          );
+          for (let b = 0; b < run.length; b++) {
+            const cl = run[b];
+            const st = settled[b];
+            const result: ToolResult =
+              st.status === 'fulfilled'
+                ? st.value
+                : toolError(cl.name, cl.id, st.reason);
+            toolResults.push(result);
+            opts.onEvent?.({ type: 'tool_result', result });
+            opts.onToolResult?.(result);
+            // Read-only batch calls cannot change files; a success simply
+            // clears any pending failed-repeat streak (the 5x guard itself is
+            // for mutating actions and runs only in runOneSequential).
+            if (result.ok) {
+              lastFailedFingerprint = '';
+              failedRepeatCount = 0;
+            }
+            let failureGuidance = '';
+            if (!result.ok) {
+              const cls = classifyToolFailure(result.content);
+              if (cls.category !== 'cancelled' && cls.guidance) {
+                failureGuidance = `\n\n[${cls.category}] Recovery: ${cls.guidance}`;
+              }
+            }
+            messages.push({
+              role: 'tool',
+              content:
+                result.content.slice(0, 12000) +
+                (failureGuidance ? `\n${failureGuidance}` : ''),
+              tool_call_id: result.callId
+            });
+          }
+          roundIdx = runEnd;
+          continue;
+        }
+
+        // Single call: strictly sequential (gates + guard apply here).
+        const stopped = await runOneSequential(roundCalls[roundIdx]);
+        roundIdx += 1;
+        if (stopped) break; // guard escalated; next LLM iteration summarizes
+      }
     }
 
     // P1.2 auto-verify: after an iteration that edited files, run the

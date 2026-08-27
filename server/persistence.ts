@@ -15,15 +15,32 @@ export interface StoredRun {
   error?: string;
 }
 
+/**
+ * P7.4 item 1: a scoping key for long-term memories. `'global'` means usable
+ * from any workspace (user-wide conventions, cross-project facts); anything
+ * else is a normalized workspace directory path — the memory only surfaces
+ * when that project is loaded. Legacy records (no `scope`) are treated as
+ * `'global'` on load.
+ */
+export type MemoryScope = 'global' | string;
+
+export interface LongTermMemoryRecord {
+  id: string;
+  category: string;
+  key: string;
+  value: string;
+  source: string;
+  createdAt: string;
+  /** P7.4 item 1: scope (see MemoryScope). Absent/empty = 'global'. */
+  scope?: MemoryScope;
+  /** P7.4 item 1: free-form tags, used for scoped retrieval boosts. */
+  tags?: string[];
+  /** P7.4 item 1: last time this memory was surfaced (recency tiebreak). */
+  lastAccessedAt?: string;
+}
+
 export interface AgentStore {
-  longTermMemories: Array<{
-    id: string;
-    category: string;
-    key: string;
-    value: string;
-    source: string;
-    createdAt: string;
-  }>;
+  longTermMemories: LongTermMemoryRecord[];
   transcripts: Record<
     string,
     Array<{ role: 'user' | 'assistant'; content: string; at: string }>

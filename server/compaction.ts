@@ -1,13 +1,19 @@
-/**
- * P1.5b Self-summarizing compaction + P1.5c groundwork (token accountant).
- *
- * When the running conversation nears the model's context budget, the oldest
- * turns are replaced by a single LLM-generated digest BEFORE num_ctx overflow,
- * instead of destructively head-truncating tool results. The digest is
- * instructed to preserve exactly what matters across long sessions: decisions,
- * file paths + what was learned about them, errors hit + fixes applied, and
- * open work.
- */
+import fs from 'fs';
+import path from 'path';
+
+// P1.5b Self-summarizing compaction + P1.5c groundwork (token accountant).
+//
+// When the running conversation nears the model's context budget, the oldest
+// turns are replaced by a single LLM-generated digest BEFORE num_ctx overflow,
+// instead of destructively head-truncating tool results. The digest is
+// instructed to preserve exactly what matters across long sessions: decisions,
+// file paths + what was learned about them, errors hit + fixes applied, and
+// open work.
+//
+// P7.4 non-lossy mode: before replacing digested turns, the full verbatim
+// transcript is persisted to <root>/.opencode/memory/<runId>-<n>.md and the
+// digest carries a pointer to it, so the agent can read_file the full detail
+// back at any time.
 
 export interface CompactionMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -124,9 +130,18 @@ async function summarizeWithLlm(
   }
 }
 
-function renderDigest(digest: string, turnsDigested: number): string {
+function renderDigest(
+  digest: string,
+  turnsDigested: number,
+  pointer?: { relPath: string; chars: number }
+): string {
+  const pointerLine = pointer
+    ? '\nFull verbatim transcript (re-read for exact detail): ' +
+      `read_file ${pointer.relPath} (${pointer.chars} chars)\n`
+    : '';
   return (
     `${DIGEST_MARKER} — ${turnsDigested} older turn(s) summarized to save context] ===\n` +
+    pointerLine +
     digest +
     '\n=== END DIGEST ==='
   );
@@ -142,6 +157,76 @@ export interface CompactionOptions {
   keepRecentTurns?: number;
   /** Never digest more than this many turns in one pass (default 12). */
   maxTurnsPerPass?: number;
+  /**
+   * P7.4 non-lossy compaction: when set (with `runId`), the full verbatim
+   * transcript of the digested turns is written to `<root>/.opencode/memory/`
+   * and the digest references it by pointer. Best-effort — IO failure falls
+   * back to the plain digest and never breaks the run.
+   */
+  root?: string;
+  runId?: string;
+}
+
+/**
+ * P7.4: persist the digested window verbatim so nothing is lost to
+ * summarization. Returns the relative path the agent can `read_file`.
+ * The path is derived from `runId` + a per-run sequence number, so repeated
+ * compactions in the same run append distinct files instead of overwriting
+ * each other (window size alone is NOT unique: several compactions can digest
+ * the same number of messages).
+ * Best-effort: returns null on any error (bad runId, IO failure, etc.).
+ */
+function nextTranscriptSeq(rootAbs: string, safeRun: string): number {
+  try {
+    const dir = path.join(rootAbs, '.opencode', 'memory');
+    let max = 0;
+    for (const n of fs.readdirSync(dir)) {
+      const m = n.match(new RegExp('^' + safeRun + '-c(\\d+)\\.md$'));
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+    return max + 1;
+  } catch {
+    return 1;
+  }
+}
+
+function writeNonLossyTranscript(
+  rootAbs: string,
+  runId: string,
+  messages: CompactionMessage[],
+  seq: number
+): string | null {
+  try {
+    const safeRun = runId.replace(/[^\w-]/g, '_').slice(0, 64);
+    if (!safeRun) return null;
+    const dir = path.join(rootAbs, '.opencode', 'memory');
+    const relPath = `.opencode/memory/${safeRun}-c${seq}.md`;
+    const parts: string[] = [
+      `# Conversation transcript — ${safeRun} (compaction ${seq})`,
+      '',
+      `Captured ${new Date().toISOString()} during self-summarizing compaction.`,
+      `This file holds the FULL verbatim turns that the digest in the live context`,
+      `replaced. Read it back (read_file ${relPath}) whenever exact detail is needed.`,
+      ''
+    ];
+    for (const m of messages) {
+      const calls = m.tool_calls
+        ?.map((c) => ` [tool_call: ${c.function.name} ${c.function.arguments}]`)
+        .join('');
+      parts.push(`## [${m.role}]${calls || m.tool_call_id ? ' [tool_result]' : ''}`);
+      parts.push('');
+      parts.push(m.content || '(empty)');
+      parts.push('');
+    }
+    fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(rootAbs, relPath);
+    const tmp = target + '.tmp';
+    fs.writeFileSync(tmp, parts.join('\n'), 'utf-8');
+    fs.renameSync(tmp, target);
+    return relPath;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -182,9 +267,24 @@ export async function compactWithSummary(
   const digest = await summarizeWithLlm(opts.endpoint, opts.modelId, transcript, opts.signal);
   if (!digest) return 0;
 
+  // P7.4: persist the digested window verbatim BEFORE we splice it out of the
+  // live message array — this is the whole point of non-lossy compaction.
+  let pointer: { relPath: string; chars: number } | undefined;
+  if (opts.root && opts.runId) {
+    const safeRun = opts.runId.replace(/[^\w-]/g, '_').slice(0, 64);
+    if (safeRun) {
+      const seq = nextTranscriptSeq(opts.root, safeRun);
+      const verbatim = messages.slice(startIdx, endIdx);
+      const relPath = writeNonLossyTranscript(opts.root, opts.runId, verbatim, seq);
+      if (relPath) {
+        pointer = { relPath, chars: verbatim.reduce((n, m) => n + (m.content?.length || 0), 0) };
+      }
+    }
+  }
+
   const replacement: CompactionMessage = {
     role: 'user',
-    content: renderDigest(digest, digested.length)
+    content: renderDigest(digest, digested.length, pointer)
   };
   messages.splice(startIdx, endIdx - startIdx, replacement);
   return digested.length;

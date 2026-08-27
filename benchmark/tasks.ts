@@ -38,6 +38,13 @@ export interface EvalTask {
   runId?: string;
   /** Iteration cap for live mode (mock mode caps at script length + 2). */
   liveMaxIterations?: number;
+  /**
+   * P7.4: context budget (est. tokens) pushed to the loop as sampling.numCtxTokens.
+   * Triggers the self-summarizing compaction path inside runAgentLoop (mock or live).
+   */
+  numCtxTokens?: number;
+  /** P7.4: recent turns kept verbatim when compaction digests older ones. */
+  compactionKeepTurns?: number;
   setup: (root: string) => void;
   passes: Pass[];
   verify: (root: string, meta: EvalMeta) => CheckResult[];
@@ -971,6 +978,112 @@ export const TASKS: EvalTask[] = [
         containsCk(root, 'big.ts', 'export const VERSION = 2;'),
         notContainsCk(root, 'big.ts', 'export const VERSION = 1;'),
         { name: 'earlier lines intact (300 consts + new version)', ok: content.includes('const N150 = 150;') && content.includes('const N300 = 300;') }
+      ];
+    }
+  },
+
+  // ================= P7.4: compaction quality bar =================
+
+  {
+    id: 'tricky-compaction-survival',
+    name: 'finish a multi-step task across 3+ live compactions',
+    category: 'tricky',
+    runId: 'eval-compact-1',
+    numCtxTokens: 350,
+    compactionKeepTurns: 1,
+    description:
+      'Phase 7.4 quality bar (mock + live): a 950-line fixture with a 350-token budget forces 3+ real self-summarizing compactions before the model writes findings.txt. Surviving means (a) the loop still completes all 6 window reads + write + ledger close, (b) findings.txt is byte-exact in file order (the format/order only lives in the user prompt, which survives via non-lossy transcripts), and (c) every required window is preserved verbatim on disk under .opencode/memory/.',
+    setup: (root) => {
+      const lines: string[] = [];
+      for (let i = 1; i <= 950; i++) {
+        lines.push('const V' + String(i).padStart(3, '0') + ' = ' + i + ' * ' + i + ';');
+      }
+      write(root, 'big.ts', lines.join('\n') + '\n');
+    },
+    passes: [
+      {
+        prompt:
+          'Context-stress test: your context budget is tiny, so compaction WILL run many times. Follow these steps exactly, in order: ' +
+          '(1) scan these 6 windows with read_file of big.ts, EXACTLY these offset/limit pairs and nothing else: 119/25, 279/25, 439/25, 599/25, 759/25, 899/25; ' +
+          '(2) then write_file findings.txt containing ONLY the 4 FINDING lines for the windows 120, 280, 440, 600, in that file-position order, each formatted exactly FINDING <offset>: <first token of the first line of that window> (e.g. FINDING 120: V120); ' +
+          '(3) then update_task once, marking every step completed. Use no other tools.',
+        script: [
+          toolCall('read_file', { path: 'big.ts', offset: 119, limit: 25 }),
+          toolCall('read_file', { path: 'big.ts', offset: 279, limit: 25 }),
+          toolCall('read_file', { path: 'big.ts', offset: 439, limit: 25 }),
+          toolCall('read_file', { path: 'big.ts', offset: 599, limit: 25 }),
+          toolCall('read_file', { path: 'big.ts', offset: 759, limit: 25 }),
+          toolCall('read_file', { path: 'big.ts', offset: 899, limit: 25 }),
+          toolCall('write_file', {
+            path: 'findings.txt',
+            content: 'FINDING 120: V120\nFINDING 280: V280\nFINDING 440: V440\nFINDING 600: V600\n'
+          }),
+          toolCall('update_task', {
+            title: 'Compaction survival scan',
+            steps: [
+              { text: 'scan windows 120, 280, 440, 600, 760, 900', status: 'completed' },
+              { text: 'write findings.txt in file order', status: 'completed' }
+            ],
+            next_action: 'none'
+          }),
+          text('Scanned all six windows and wrote findings.txt in file order.')
+        ]
+      }
+    ],
+    verify: (root, meta) => {
+      // (a) loop finished the whole job: write + ledger close + closing reply
+      const wrote = (meta.replies[0] || '').includes('findings.txt') || (meta.replies[0] || '').includes('windows');
+      const l = loadLedger(root, 'eval-compact-1');
+      const closed = !!l && l.steps.length > 0 && l.steps.every((s) => s.status === 'completed');
+
+      // (b) artifact is byte-exact, in file-position order
+      let body = '';
+      try {
+        body = read(root, 'findings.txt');
+      } catch {
+        body = '';
+      }
+      const exact =
+        body === 'FINDING 120: V120\nFINDING 280: V280\nFINDING 440: V440\nFINDING 600: V600\n';
+      const orderOk =
+        body.indexOf('FINDING 120') !== -1 &&
+        body.indexOf('FINDING 120') < body.indexOf('FINDING 280') &&
+        body.indexOf('FINDING 280') < body.indexOf('FINDING 440') &&
+        body.indexOf('FINDING 440') < body.indexOf('FINDING 600');
+
+      // (c) 3+ compaction events, every required window verbatim on disk
+      const memDir = path.join(root, '.opencode', 'memory');
+      const files = (() => {
+        try {
+          return fs
+            .readdirSync(memDir)
+            .filter((n) => n.startsWith('eval-compact-1-') && n.endsWith('.md'))
+            .length;
+        } catch {
+          return 0;
+        }
+      })();
+      const required = ['const V120 = 120 * 120;', 'const V280 = 280 * 280;', 'const V440 = 440 * 440;', 'const V600 = 600 * 600;'];
+      let covered = 0;
+      if (files > 0) {
+        try {
+          const all = fs
+            .readdirSync(memDir)
+            .filter((n) => n.startsWith('eval-compact-1-') && n.endsWith('.md'))
+            .map((n) => fs.readFileSync(path.join(memDir, n), 'utf8'))
+            .join('\n');
+          covered = required.filter((w) => all.includes(w)).length;
+        } catch {
+          covered = 0;
+        }
+      }
+      return [
+        { name: '3+ non-lossy transcripts persisted on disk (' + files + ' found)', ok: files >= 3 },
+        { name: 'all 4 required windows preserved verbatim (' + covered + '/4)', ok: covered >= 4 },
+        { name: 'findings.txt byte-exact', ok: exact, detail: exact ? undefined : 'got: ' + JSON.stringify(body.slice(0, 200)) },
+        { name: 'findings.txt in file-position order (120,280,440,600)', ok: orderOk },
+        { name: 'run finished with a closing summary', ok: wrote },
+        { name: 'task ledger closed (all steps completed)', ok: closed }
       ];
     }
   }

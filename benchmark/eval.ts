@@ -137,6 +137,31 @@ function startMockOllama(responses: PassMsg[]): Promise<MockOllama> {
     req.on('end', () => {
       if (req.method === 'POST' && req.url === '/api/chat') {
         receivedBodies.push(body);
+        let parsed: any = {};
+        try {
+          parsed = JSON.parse(body);
+        } catch {}
+        // P7.4: self-summarization request (no tools + CONVERSATION EXCERPT
+        // prompt). Answer with a valid digest WITHOUT consuming a scripted slot,
+        // so compaction events don't desynchronize the agent script.
+        const isSummary =
+          !parsed.tools &&
+          typeof parsed.messages?.[0]?.content === 'string' &&
+          parsed.messages[0].content.includes('CONVERSATION EXCERPT');
+        if (isSummary) {
+          r.writeHead(200, { 'Content-Type': 'application/json' });
+          r.end(
+            JSON.stringify({
+              message: {
+                role: 'assistant',
+                content:
+                  'Decisions: continue the in-flight plan. Files: big.ts (window scan); findings.txt (accumulate FINDING lines in file order). ' +
+                  'Errors & Fixes: none so far. Remaining: finish all windows, then write findings.txt verbatim and close the task ledger.'
+              }
+            })
+          );
+          return;
+        }
         // Clamp: if a buggy script under-provides responses, repeat the last
         // (final text) message so the loop terminates instead of hanging.
         const i = Math.min(n, responses.length - 1);
@@ -240,6 +265,12 @@ async function runOneTask(task: EvalTask, args: Args): Promise<TaskOutcome> {
             signal: ac.signal,
             priorMessages: usePrior,
             runId: task.runId,
+            // P7.4: some tasks force a small context budget to exercise the
+            // self-summarizing compaction path (see tricky-compaction-survival).
+            sampling: task.numCtxTokens
+              ? { temperature: 0.7, topP: 0.9, repeatPenalty: 1.1, numCtxTokens: task.numCtxTokens }
+              : undefined,
+            compactionKeepTurns: task.compactionKeepTurns,
             onEvent: args.verbose
               ? (evt) => {
                   if (evt.type === 'tool_call')

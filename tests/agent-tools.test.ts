@@ -94,3 +94,73 @@ describe('parseJsonActionBlock', () => {
     expect(parseJsonActionBlock('just talking, no json here')).toBeNull();
   });
 });
+
+// P7.4 item 1: recall / remember tools (only active when backends are wired)
+describe('executeTool: recall & remember (scoped memory tools)', () => {
+  it('fails gracefully when the backends are not wired', async () => {
+    const r = await executeTool(root, call('recall', { query: 'any' }));
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain('unavailable');
+    const m = await executeTool(root, call('remember', { key: 'k', value: 'v' }));
+    expect(m.ok).toBe(false);
+    expect(m.content).toContain('unavailable');
+  });
+
+  it('recall passes query through and reports its body', async () => {
+    const r = await executeTool(
+      root,
+      call('recall', { query: 'lint command', k: 99 }),
+      { queryMemories: async (q, k) => `HITS for "${q}" (k=${k})` }
+    );
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('lint command');
+    expect(r.content).toContain('k=12'); // capped by the tool to <=12
+  });
+
+  it('recall reports an empty result as no-matches', async () => {
+    const r = await executeTool(root, call('recall', { query: 'x' }), { queryMemories: async () => '' });
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('no matching memories');
+  });
+
+  it('remember requires key and value', async () => {
+    const r = await executeTool(root, call('remember', { key: '', value: 'v' }), { remember: async () => ({ ok: true }) });
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain('requires both key and value');
+  });
+
+  it('remember forwards normalized args and reports success', async () => {
+    let got: any = null;
+    const r = await executeTool(
+      root,
+      call('remember', {
+        key: 'lint_command',
+        value: 'npm run lint',
+        category: 'convention',
+        tags: ['npm', 'ci', '   ', ''],
+        scope: 'c:\\proj'
+      }),
+      {
+        remember: async (args) => {
+          got = args;
+          return { ok: true };
+        }
+      }
+    );
+    expect(r.ok).toBe(true);
+    expect(got.key).toBe('lint_command');
+    expect(got.value).toBe('npm run lint');
+    expect(got.tags).toEqual(['npm', 'ci']);
+    expect(got.scope).toBe('c:\\proj'); // scope passthrough (canonicalization is the engine's job)
+  });
+
+  it('remember propagates backend failure as a tool error', async () => {
+    const r = await executeTool(
+      root,
+      call('remember', { key: 'k', value: 'v' }),
+      { remember: async () => ({ ok: false, error: 'disk full' }) }
+    );
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain('disk full');
+  });
+});

@@ -156,16 +156,175 @@ app.post('/api/models/detect-local', async (req: Request, res: Response) => {
 });
 
 // ---------------- LONG TERM MEMORY ENGINE ----------------
+type MemoryCategory = 'convention' | 'fact' | 'architecture' | 'preference' | 'bug_note';
+type MemorySource = 'auto_extracted' | 'user_defined' | 'workspace_scan' | 'agent_remembered';
+
+// P7.4 item 1: scoped memory record. `scope` is either 'global' (usable from
+// any workspace) or a normalized workspace path (only surfaces for that
+// project). Legacy records (no scope) load as 'global'.
 interface ServerLongTermMemory {
   id: string;
-  category: 'convention' | 'fact' | 'architecture' | 'preference' | 'bug_note';
+  category: MemoryCategory;
   key: string;
   value: string;
-  source: 'auto_extracted' | 'user_defined' | 'workspace_scan';
+  source: MemorySource;
   createdAt: string;
+  scope: string; // 'global' or normalized workspace path
+  tags?: string[];
+  lastAccessedAt?: string;
 }
 
 let serverLongTermMemories: ServerLongTermMemory[] = [];
+
+// ---------------- P7.4 item 1: scoped memory engine ----------------
+
+/**
+ * Canonical form of a scope: 'global' or a normalized workspace path.
+ * Windows drive letters keep their colon ('C:\x' -> 'c:/x'); trailing
+ * slashes are trimmed; backslashes become '/'; lowered.
+ */
+export function canonicalScope(raw: unknown): string {
+  if (raw === undefined || raw === null || raw === '') return 'global';
+  let s = String(raw).trim().split('\\').join('/');
+  if (!s || s.toLowerCase() === 'global') return 'global';
+  // Windows drive-letter path: "C\Users", "C:/Users", or bare "C" -> "C:...".
+  if (/^[A-Za-z](?:\/|$)/.test(s)) {
+    s = s.charAt(0).toUpperCase() + ':' + s.slice(1);
+  }
+  while (s.endsWith('/')) s = s.slice(0, -1);
+  return s.toLowerCase();
+}
+
+
+
+
+
+/** A memory is visible for workspace `ws` if it is global OR scoped to it. */
+function memoryVisibleFor(ws: string | undefined): (m: ServerLongTermMemory) => boolean {
+  const target = canonicalScope(ws);
+  return (m: ServerLongTermMemory) => {
+    const s = canonicalScope(m.scope);
+    return s === 'global' || (target !== 'global' && s === target);
+  };
+}
+
+/**
+ * A memory is *clearable* for workspace `ws` iff it is scoped exactly to it.
+ * Global memories are shared across projects and must never be wiped by a
+ * per-project CLEAR — pass 'global' to clear the shared pool.
+ */
+function memoryClearableFor(ws: string | undefined): (m: ServerLongTermMemory) => boolean {
+  const target = canonicalScope(ws);
+  return (m: ServerLongTermMemory) => canonicalScope(m.scope) === target;
+}
+
+/**
+ * P7.4 item 1: retrieve memories visible for the given workspace, ranked.
+ * "Visible" = global OR scoped to this workspace — so loading a project never
+ * leaks another project's memories, but cross-project facts (global) still
+ * surface. `embed` is injectable so tests never touch the network.
+ */
+export async function retrieveScopedMemories(
+  ws: string | undefined,
+  query: string,
+  k = 6,
+  embed?: (text: string) => Promise<number[] | null>
+): Promise<ServerLongTermMemory[]> {
+  const embedLocal = embed || ((t: string) => embedText(t) as Promise<number[] | null>);
+  const visible = serverLongTermMemories.filter(memoryVisibleFor(ws));
+  if (visible.length === 0) return [];
+
+  const qvec = query ? await embedLocal(query) : null;
+  // Warm missing embeddings in the background for next time; persist after.
+  if (qvec) {
+    const missing = visible.filter((m) => !embeddingCache[m.id]).slice(0, 20);
+    if (missing.length) {
+      Promise.all(
+        missing.map((m) => getMemoryEmbedding(m.id, `${m.key}: ${m.value}`))
+      ).then(() => saveEmbeddingCache(process.cwd(), embeddingCache)).catch(() => {});
+    }
+  }
+
+  const scoreOne = (m: ServerLongTermMemory) => {
+    const tags = (m.tags || []).join(' ');
+    let score = keywordScore(query, `${m.key} ${m.value} ${tags}`);
+    const mvec = embeddingCache[m.id];
+    if (qvec && mvec) {
+      const cos = cosineSimilarity(qvec, mvec);
+      score = Math.max(score, cos > 0 ? cos : 0);
+    }
+    if (m.lastAccessedAt) score += 0.001; // recency tiebreak only
+    return score;
+  };
+
+  const scored = visible.map((m) => ({ memory: m, score: scoreOne(m) }));
+  scored.sort((a, b) => b.score - a.score);
+  // Never return nothing — old behavior (best k) beats silence.
+  const top = scored.slice(0, k).map((s) => s.memory);
+  try {
+    const now = new Date().toISOString();
+    for (const m of top) m.lastAccessedAt = now;
+  } catch {}
+  return top;
+}
+
+/**
+ * P7.4 item 1: mutate the in-memory index and persist to the store.
+ * Exposed separately so endpoints, agent tools, and extraction all share one
+ * source of truth instead of poking the array directly.
+ */
+export function addMemoryToIndex(item: {
+  key: string;
+  value: string;
+  category?: unknown;
+  source?: unknown;
+  createdAt?: string;
+  scope?: unknown;
+  tags?: unknown;
+  lastAccessedAt?: string;
+  id?: string;
+}): ServerLongTermMemory {
+  const record: ServerLongTermMemory = {
+    id: item.id || `ltm-${cryptoRandomUUID()}`,
+    key: String(item.key).trim(),
+    value: String(item.value).trim(),
+    category: (['fact', 'preference', 'convention', 'architecture', 'bug_note'].includes(String(item.category))
+      ? String(item.category)
+      : 'fact') as MemoryCategory,
+    source: (['auto_extracted', 'user_defined', 'workspace_scan', 'agent_remembered'].includes(String(item.source))
+      ? String(item.source)
+      : 'user_defined') as MemorySource,
+    createdAt: item.createdAt || new Date().toISOString(),
+    scope: canonicalScope(item.scope),
+    tags: Array.isArray(item.tags) ? item.tags.map((t) => String(t)).filter(Boolean) : undefined,
+    lastAccessedAt: item.lastAccessedAt
+  };
+  serverLongTermMemories.unshift(record);
+  return record;
+}
+
+export function removeMemoryById(id: string): boolean {
+  const before = serverLongTermMemories.length;
+  serverLongTermMemories = serverLongTermMemories.filter((m) => m.id !== id);
+  const removed = serverLongTermMemories.length !== before;
+  if (removed) {
+    delete embeddingCache[id];
+    try { saveEmbeddingCache(process.cwd(), embeddingCache); } catch {}
+  }
+  return removed;
+}
+
+export function clearVisibleMemories(ws: string | undefined): number {
+  const clearable = serverLongTermMemories.filter(memoryClearableFor(ws));
+  for (const m of clearable) delete embeddingCache[m.id];
+  serverLongTermMemories = serverLongTermMemories.filter((m) => !memoryClearableFor(ws)(m));
+  try { saveEmbeddingCache(process.cwd(), embeddingCache); } catch {}
+  return clearable.length;
+}
+
+export function visibleMemoryList(ws: string | undefined): ServerLongTermMemory[] {
+  return serverLongTermMemories.filter(memoryVisibleFor(ws));
+}
 
 // Trusted workspace root per session (set by load-directory); used by the path guard.
 // Defaults to the app's own directory so the agent works on real files out of the box.
@@ -252,101 +411,68 @@ async function getMemoryEmbedding(id: string, text: string): Promise<number[] | 
   return vec;
 }
 
-/**
- * Rank long-term memories against a query using embeddings (nomic-embed-text),
- * blending in keyword overlap so exact terms always surface.
- * Falls back to keyword-only ranking when embeddings are unavailable.
- */
-async function retrieveRelevantMemories(query: string, k = 6): Promise<ServerLongTermMemory[]> {
-  if (serverLongTermMemories.length === 0) return [];
-  const qvec = await embedText(query);
-  const scored = serverLongTermMemories.map((m) => {
-    let score = keywordScore(query, `${m.key} ${m.value}`);
-    const mvec = embeddingCache[m.id];
-    if (qvec && mvec) {
-      const cos = cosineSimilarity(qvec, mvec);
-      score = Math.max(score, cos > 0 ? cos : 0);
-    }
-    return { memory: m, score };
-  });
-
-  // Warm any missing embeddings in the background for next time; persist after
-  if (qvec) {
-    const missing = serverLongTermMemories.filter((m) => !embeddingCache[m.id]).slice(0, 20);
-    if (missing.length) {
-      Promise.all(
-        missing.map((m) => getMemoryEmbedding(m.id, `${m.key}: ${m.value}`))
-      ).then(() => saveEmbeddingCache(process.cwd(), embeddingCache)).catch(() => {});
-    }
-  }
-
-  scored.sort((a, b) => b.score - a.score);
-  const top = scored.filter((s) => s.score > 0.12).slice(0, k).map((s) => s.memory);
-  // Never return nothing — old behavior (all memories) beats silence
-  return top.length ? top : serverLongTermMemories.slice(0, k);
-}
-
-// Memory API GET
+// Memory API GET — scope-aware: only memories visible for this session's workspace
 app.get('/api/memory', (req: Request, res: Response) => {
-  res.json({
-    longTermMemories: serverLongTermMemories,
-    count: serverLongTermMemories.length
-  });
+  const sessionId = (req.query.sessionId as string) || 'default';
+  const ws = getWorkspaceRoot(sessionId);
+  const visible = visibleMemoryList(ws);
+  res.json({ longTermMemories: visible, count: visible.length });
 });
 
-// Memory API ADD
-app.post('/api/memory/add', (req: Request, res: Response) => {
-  const { key, value, category = 'convention', source = 'user_defined' } = req.body || {};
+// Memory API ADD — scope-aware: defaults to the session's workspace, allows 'global'
+app.post('/api/memory/add', async (req: Request, res: Response) => {
+  const { key, value, category = 'convention', source = 'user_defined', scope, tags, sessionId = 'default' } = req.body || {};
   if (!key || !value) {
     return res.status(400).json({ error: 'Key and value are required' });
   }
-
-  const newItem: ServerLongTermMemory = {
-    id: `ltm-${cryptoRandomUUID()}`,
-    key: key.trim(),
-    value: value.trim(),
+  // Default to the current session's workspace; honor explicit 'global'.
+  const defaultScope = canonicalScope(getWorkspaceRoot(sessionId));
+  const finalScope = scope ? canonicalScope(scope) : defaultScope;
+  const record = addMemoryToIndex({
+    key,
+    value,
     category,
     source,
-    createdAt: new Date().toLocaleDateString()
-  };
-
-  serverLongTermMemories.unshift(newItem);
+    scope: finalScope,
+    tags,
+    createdAt: new Date().toISOString()
+  });
   persistStore();
   // Warm embedding cache in background for semantic retrieval
-  embedText(`${newItem.key}: ${newItem.value}`)
-    .then((vec) => {
-      if (vec) {
-        embeddingCache[newItem.id] = vec;
-        saveEmbeddingCache(process.cwd(), embeddingCache);
-      }
-    })
-    .catch(() => {});
-  res.json({ success: true, item: newItem, longTermMemories: serverLongTermMemories });
+  try {
+    const vec = await embedText(`${record.key}: ${record.value}`);
+    if (vec) {
+      embeddingCache[record.id] = vec;
+      saveEmbeddingCache(process.cwd(), embeddingCache);
+    }
+  } catch {}
+  res.json({ success: true, item: record, longTermMemories: visibleMemoryList(finalScope) });
 });
 
 // Memory API DELETE
 app.delete('/api/memory/:id', (req: Request, res: Response) => {
   const { id } = req.params;
-  serverLongTermMemories = serverLongTermMemories.filter((m) => m.id !== id);
-  delete embeddingCache[id];
-  saveEmbeddingCache(process.cwd(), embeddingCache);
+  const removed = removeMemoryById(id);
   persistStore();
-  res.json({ success: true, longTermMemories: serverLongTermMemories });
+  res.json({ success: removed, longTermMemories: serverLongTermMemories });
 });
 
-// Memory API CLEAR
+// Memory API CLEAR — clears only this workspace's own (project-scoped) memories.
+// Global (cross-project) memories and other projects' memories are untouched.
 app.post('/api/memory/clear', (req: Request, res: Response) => {
-  serverLongTermMemories = [];
-  embeddingCache = {};
-  saveEmbeddingCache(process.cwd(), embeddingCache);
+  const { sessionId = 'default' } = req.body || {};
+  const ws = getWorkspaceRoot(sessionId);
+  const before = serverLongTermMemories.length;
+  const cleared = clearVisibleMemories(ws);
   persistStore();
-  res.json({ success: true, longTermMemories: [] });
+  res.json({ success: true, cleared, remaining: serverLongTermMemories.length - cleared, longTermMemories: serverLongTermMemories });
 });
 
-// Memory API AUTO-EXTRACT — uses the local LLM to mine durable project facts
+// Memory API AUTO-EXTRACT — scopes extracted facts to the current workspace.
 app.post('/api/memory/extract', async (req: Request, res: Response) => {
   const { sessionId = 'default', modelId, modelEndpoint } = req.body || {};
   const root = getWorkspaceRoot(sessionId);
+  const scope = canonicalScope(root);
 
   const workspaceIndex = buildWorkspaceIndex(root).slice(0, 4000);
   const recentTranscript = (appStore.transcripts[sessionId] || [])
@@ -382,7 +508,6 @@ Return ONLY a JSON array, no prose: [{"key": "short-name", "value": "the fact", 
     });
   }
 
-  // Parse the JSON array out of the reply
   let items: Array<{ key?: string; value?: string; category?: string }> = [];
   try {
     const m = raw.match(/\[[\s\S]*\]/);
@@ -390,34 +515,35 @@ Return ONLY a JSON array, no prose: [{"key": "short-name", "value": "the fact", 
   } catch {}
 
   if (!Array.isArray(items) || items.length === 0) {
-    return res.status(200).json({ success: false, message: 'Model returned no usable memories.', longTermMemories: serverLongTermMemories });
+    return res.status(200).json({ success: false, message: 'Model returned no usable memories.', longTermMemories: visibleMemoryList(scope) });
   }
 
-  const extracted: ServerLongTermMemory[] = items
-    .filter((i) => i.key && i.value)
-    .slice(0, 5)
-    .map((i) => ({
-      id: `ltm-${cryptoRandomUUID()}`,
+  const extracted: ServerLongTermMemory[] = [];
+  for (const i of items.filter((x) => x && x.key && x.value).slice(0, 5)) {
+    const rec = addMemoryToIndex({
       key: String(i.key).slice(0, 80),
       value: String(i.value).slice(0, 500),
-      category: (['fact', 'preference', 'convention'].includes(String(i.category)) ? String(i.category) : 'fact') as ServerLongTermMemory['category'],
-      source: 'auto_extracted' as ServerLongTermMemory['source'],
-      createdAt: new Date().toLocaleDateString()
-    }));
-
-  serverLongTermMemories.unshift(...extracted);
+      category: ['fact', 'preference', 'convention', 'architecture', 'bug_note'].includes(String(i.category)) ? String(i.category) : 'fact',
+      source: 'auto_extracted',
+      scope,
+      createdAt: new Date().toISOString()
+    });
+    extracted.push(rec);
+  }
   persistStore();
-  // Warm embedding cache for the new memories
-  Promise.all(
-    extracted.map((m) =>
-      embedText(`${m.key}: ${m.value}`).then((vec) => {
-        if (vec) embeddingCache[m.id] = vec;
-      })
-    )
-  )
-    .then(() => saveEmbeddingCache(process.cwd(), embeddingCache))
-    .catch(() => {});
-  res.json({ success: true, items: extracted, longTermMemories: serverLongTermMemories });
+  // Warm embeddings for the new memories
+  await Promise.all(
+    extracted.map(async (m) => {
+      try {
+        const v = await embedText(`${m.key}: ${m.value}`);
+        if (v) {
+          embeddingCache[m.id] = v;
+          saveEmbeddingCache(process.cwd(), embeddingCache);
+        }
+      } catch {}
+    })
+  );
+  res.json({ success: true, items: extracted, longTermMemories: visibleMemoryList(scope) });
 });
 
 // Models endpoint
@@ -982,7 +1108,18 @@ import { getPluginToolDefs, buildPluginSchemas, executePluginTool } from './serv
 // RE1: disk-backed store (survives restarts)
 const appStore: AgentStore = loadStore(process.cwd());
 if (appStore.longTermMemories.length && serverLongTermMemories.length === 0) {
-  serverLongTermMemories = appStore.longTermMemories as typeof serverLongTermMemories;
+  // P7.4 item 1: normalize legacy records (no scope/tags) onto the new shape.
+  serverLongTermMemories = appStore.longTermMemories.map((r) => ({
+    id: r.id,
+    category: r.category as MemoryCategory,
+    key: r.key,
+    value: r.value,
+    source: r.source as MemorySource,
+    createdAt: r.createdAt,
+    scope: canonicalScope((r as any).scope),
+    tags: Array.isArray((r as any).tags) ? (r as any).tags.map((t: unknown) => String(t)) : undefined,
+    lastAccessedAt: (r as any).lastAccessedAt
+  }));
 }
 function persistStore(): void {
   try {
@@ -1430,13 +1567,13 @@ async function resolveTaskContext(
     taskParams.numCtxTokens = ollamaCtx;
   }
 
-  const relevantMemories = await retrieveRelevantMemories(prompt);
-  // eslint-disable-next-line no-control-regex
+  const wsRoot = getWorkspaceRoot(sessionId);
+  const relevantMemories = await retrieveScopedMemories(wsRoot, prompt);
   const ltmBlock =
     relevantMemories.length > 0
       ? `=== RELEVANT LONG-TERM PROJECT MEMORIES (LTM) ===\n` +
         relevantMemories.map((m) => `- [${m.category}] ${m.key}: ${m.value}`).join('\n') +
-        `\n\n`
+        `\n- These are cross-session facts/conventions. Use the recall tool to look up more; remember them with the remember tool if you discover new durable facts.\n\n`
       : '';
 
   // P2.4: project rules from .devforge.json + AGENTS.md-style files
@@ -1591,6 +1728,36 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
     semanticSearch: async (query: string, k?: number) => {
       const { chunks, mode } = await retrieveCode(getWorkspaceRoot(sessionId), query, k);
       return renderRetrieval(chunks, mode);
+    },
+    // P7.4 item 1: recall — search scoped long-term memories for this workspace
+    queryMemories: async (query: string, k?: number) => {
+      const ws = getWorkspaceRoot(sessionId);
+      const results = await retrieveScopedMemories(ws, query, Math.min(k || 6, 12));
+      if (results.length === 0) return '(no memories matched this query)';
+      return results.map((m) => `- [${m.category} · ${m.scope}] ${m.key}: ${m.value}`).join('\n');
+    },
+    // P7.4 item 1: remember — persist a durable fact for this workspace or 'global'
+    remember: async (args) => {
+      const defaultScope = canonicalScope(getWorkspaceRoot(sessionId));
+      const scope: string = args.scope ? canonicalScope(args.scope) : defaultScope;
+      const rec = addMemoryToIndex({
+        category: args.category || 'fact',
+        key: args.key,
+        value: args.value,
+        source: 'agent_remembered',
+        scope,
+        tags: args.tags,
+        createdAt: new Date().toISOString()
+      });
+      persistStore();
+      try {
+        const v = await embedText(`${rec.key}: ${rec.value}`);
+        if (v) {
+          embeddingCache[rec.id] = v;
+          saveEmbeddingCache(process.cwd(), embeddingCache);
+        }
+      } catch {}
+      return { ok: true };
     },
     // P3.3: read-only explore subagent (own iteration budget, cannot edit)
     runSubagent: async (question: string) => {
