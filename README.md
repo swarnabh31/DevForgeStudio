@@ -120,8 +120,8 @@ ollama run qwen2.5-coder:7b --ctx 32768
 ### Quickstart
 
 ```bash
-git clone <this-repo>
-cd opencode-agent-studio
+git clone https://github.com/swarnabh31/DevForgeStudio.git
+cd DevForgeStudio
 npm install
 
 # start Ollama in another terminal (if not already running):
@@ -148,7 +148,7 @@ Open **http://127.0.0.1:3000**. Then:
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Dev server (Express + Vite middleware) at http://127.0.0.1:3000 |
-| `npm test` | Vitest suite (69 tests across 10 suites) |
+| `npm test` | Vitest suite (243 tests across 32 suites) |
 | `npm run lint` | TypeScript check (`tsc --noEmit`) |
 | `npm run build` | Production build |
 | `npm start` | Run production server |
@@ -180,7 +180,7 @@ The agent streams over `POST /api/agent/stream` as newline-delimited JSON events
 
 ## Security posture
 
-- Localhost-only binding (`127.0.0.1`)
+- Localhost-only binding by default (`127.0.0.1`); opt-in LAN mode binds wider but keeps a token-gate, loopback trust, timing-safe comparison, and per-route CSRF checks
 - Path traversal protection on every filesystem route
 - Binary-extension write blocking; text-only atomic writes
 - Command allowlist; permission gating for side-effecting tools

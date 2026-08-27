@@ -1,15 +1,16 @@
 {
   "name": "devforge-studio",
-  "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "tsx watch server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "node -e \"const fs=require('fs');for(const d of ['dist','build']){try{fs.rmSync(d,{recursive:true,force:true})}catch{}}\"",
     "lint": "tsc --noEmit",
+    "eval": "tsx benchmark/eval.ts",
+    "package": "powershell -ExecutionPolicy Bypass -File scripts/package.ps1",
     "test": "vitest run"
   },
   "dependencies": {

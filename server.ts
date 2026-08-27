@@ -17,7 +17,8 @@ import {
   looksBinary,
    TEXT_EXTENSIONS,
    OutlineSymbol,
-   recordMtime
+   recordMtime,
+   noteExternalChange
 } from './server/fsTools';
 
 const app = express();
@@ -32,7 +33,7 @@ app.use(express.json({ limit: '50mb' }));
 let globalWorkspace: Record<string, WorkspaceFile> = { ...DEFAULT_WORKSPACE_FILES };
 let sessionWorkspaces: Record<string, Record<string, WorkspaceFile>> = {};
 
-// Helper: REAL diagnostics — tsc --noEmit + ruff via server/diagnostics.ts,
+// Helper: REAL diagnostics â€” tsc --noEmit + ruff via server/diagnostics.ts,
 // mapped to the LSPDiagnostic shape used by the UI. No regex simulation.
 function mapRealDiagnostics(diags: RealDiagnostic[]): LSPDiagnostic[] {
   return diags.map((d, i) => ({
@@ -201,6 +202,9 @@ function ensureWorkspaceWatcher(sessionId: string): void {
   if (watchedRoots.has(root)) return;
   watchedRoots.add(root);
   watchWorkspace(root, (absPath, event) => {
+    // P1.5f: flag real external modifications of files the agent has seen,
+    // so the next write to them is refused until the agent re-reads.
+    if (event === 'change') noteExternalChange(absPath);
     // Update every session cache that maps to this root
     const rel = path.relative(root, absPath).replace(/\\/g, '/');
     for (const [sid, sroot] of Object.entries(sessionWorkspaceRoots)) {
@@ -220,7 +224,7 @@ function ensureWorkspaceWatcher(sessionId: string): void {
             isModified: ws[rel].originalContent !== content
           };
         } catch {
-          /* unreadable — keep stale copy */
+          /* unreadable â€” keep stale copy */
         }
       }
     }
@@ -278,7 +282,7 @@ async function retrieveRelevantMemories(query: string, k = 6): Promise<ServerLon
 
   scored.sort((a, b) => b.score - a.score);
   const top = scored.filter((s) => s.score > 0.12).slice(0, k).map((s) => s.memory);
-  // Never return nothing — old behavior (all memories) beats silence
+  // Never return nothing â€” old behavior (all memories) beats silence
   return top.length ? top : serverLongTermMemories.slice(0, k);
 }
 
@@ -339,7 +343,7 @@ app.post('/api/memory/clear', (req: Request, res: Response) => {
   res.json({ success: true, longTermMemories: [] });
 });
 
-// Memory API AUTO-EXTRACT — uses the local LLM to mine durable project facts
+// Memory API AUTO-EXTRACT â€” uses the local LLM to mine durable project facts
 app.post('/api/memory/extract', async (req: Request, res: Response) => {
   const { sessionId = 'default', modelId, modelEndpoint } = req.body || {};
   const root = getWorkspaceRoot(sessionId);
@@ -586,6 +590,23 @@ app.post('/api/workspace/files', async (req: Request, res: Response) => {
     globalWorkspace = workspace;
   }
 
+  // For explicitly-loaded (on-disk) sessions, persist the edited content to
+  // disk and refresh the mtime registry so agent conflict detection stays in
+  // sync with user saves (was in-memory only, causing phantom CONFLICTs).
+  if (!(imported && !explicitlyLoadedSessions.has(sessionId))) {
+    try {
+      const root = getWorkspaceRoot(sessionId);
+      const abs = resolveSafePath(root, effectiveRel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, String(content), 'utf-8');
+      recordMtime(abs);
+    } catch (err: any) {
+      // In-memory-only workspace (no real root) or escape â€” keep the update
+      // in memory; surface nothing since the in-memory state is the source of
+      // truth for the editor.
+    }
+  }
+
   const diagnostics = await runWorkspaceDiagnostics(sessionId);
 
   res.json({
@@ -769,7 +790,7 @@ app.get('/api/tools/import-graph', (req: Request, res: Response) => {
   }
 });
 
-// LSP Diagnosis Endpoint — REAL tsc --noEmit / ruff diagnostics (10s-cached)
+// LSP Diagnosis Endpoint â€” REAL tsc --noEmit / ruff diagnostics (10s-cached)
 app.post('/api/lsp/diagnose', async (req: Request, res: Response) => {
   const { filePath, sessionId = 'default' } = req.body;
 
@@ -812,7 +833,7 @@ app.post('/api/attachments/parse', async (req: Request, res: Response) => {
           return res.json({
             name,
             summary: 'PDF contains no extractable text (likely scanned images)',
-            parsedText: `[PDF ${name}: no extractable text — scanned/image-only PDF]`
+            parsedText: `[PDF ${name}: no extractable text â€” scanned/image-only PDF]`
           });
         }
         return res.json({
@@ -840,7 +861,7 @@ app.post('/api/attachments/parse', async (req: Request, res: Response) => {
   });
 });
 
-// Code Execution — REAL allowlisted command execution in the session workspace.
+// Code Execution â€” REAL allowlisted command execution in the session workspace.
 app.post('/api/workspace/execute', (req: Request, res: Response) => {
   const { command, sessionId = 'default' } = req.body;
 
@@ -851,7 +872,7 @@ app.post('/api/workspace/execute', (req: Request, res: Response) => {
   // Same security policy as the agent loop's run_command tool
   const check = isCommandAllowed(command);
   if (!check.ok) {
-    return res.status(403).json({ error: `Command rejected — ${check.reason}`, command });
+    return res.status(403).json({ error: `Command rejected â€” ${check.reason}`, command });
   }
 
   const root = getWorkspaceRoot(sessionId);
@@ -883,7 +904,7 @@ async function callLocalLLM(
   // 1. Try Ollama /api/chat
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000);
+    const timeout = setTimeout(() => controller.abort(), 600000);
     const resp = await fetch(`${cleanEp}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -904,7 +925,7 @@ async function callLocalLLM(
   // 2. Try OpenAI-compatible /v1/chat/completions (LM Studio, LocalAI, llama.cpp server)
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000);
+    const timeout = setTimeout(() => controller.abort(), 600000);
     const resp = await fetch(`${cleanEp}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -928,13 +949,35 @@ async function callLocalLLM(
 // ---------------- AGENT RUN (tool-calling loop) ----------------
 
 import { runAgentLoop, ToolResult, isCommandAllowed } from './server/agentLoop';
+import { detectVerifyCommands } from './server/verify';
+import { buildEditProposal, reviewedArgs } from './server/reviewGate';
+import { ensureRunBranch, commitVerifiedStep } from './server/gitWorkflow';
+import { validateEditedContent } from './server/editValidation';
 import { exec } from 'child_process';
 import { getSystemProfile } from './server/systemProfile';
 import { resolveTaskParams, isTaskMode, TaskMode } from './server/taskProfiles';
-import { listBackups, revertFromBackup, revertFileFromBackup } from './server/backups';
-import { loadStore, saveStore, appendRunLog, AgentStore } from './server/persistence';
+import { listBackups, revertFromBackup, revertFileFromBackup, listCheckpointFiles } from './server/backups';
+import {
+  loadStore,
+  saveStore,
+  appendRunLog,
+  AgentStore,
+  saveRunState,
+  loadRunState,
+  deleteRunState,
+  pruneOldRunStates,
+  listRunStates,
+  RunState,
+  readRunLog
+} from './server/persistence';
 import type { LoopEvent } from './server/agentLoop';
-import { computeDiffsForFiles } from './server/diffUtil';
+import { computeDiffsForFiles, computeCheckpointDiffs } from './server/diffUtil';
+import { loadProjectConfig, saveProjectConfig, loadProjectInstructions, ProjectConfig } from './server/projectConfig';
+import { retrieveCode, renderRetrieval } from './server/codeRetrieval';
+import { buildRepoMap } from './server/repoMap';
+import { getOrCreateToken, createLanGate, lanAddresses } from './server/lanAccess';
+import { findModelPreset, MODEL_PRESETS } from './server/modelMatrix';
+import { getPluginToolDefs, buildPluginSchemas, executePluginTool } from './server/pluginTools';
 
 // RE1: disk-backed store (survives restarts)
 const appStore: AgentStore = loadStore(process.cwd());
@@ -946,7 +989,7 @@ function persistStore(): void {
     appStore.longTermMemories = serverLongTermMemories;
     saveStore(process.cwd(), appStore);
   } catch (e) {
-    console.warn('[OpenCode] store save failed:', e);
+    console.warn('[DevForge] store save failed:', e);
   }
 }
 import { runRealDiagnostics, RealDiagnostic } from './server/diagnostics';
@@ -968,6 +1011,77 @@ app.get('/api/system/profile', async (_req: Request, res: Response) => {
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message || err) });
   }
+});
+
+// ---------------- P4.1 ONBOARDING: model catalog, recommendation, pull ----------------
+
+// P5.2: model compatibility matrix (tuned presets per local model family)
+app.get('/api/models/matrix', (_req: Request, res: Response) => {
+  res.json({ success: true, presets: MODEL_PRESETS });
+});
+
+const MODEL_CATALOG = [
+  { id: 'qwen2.5-coder:3b', label: 'Qwen2.5 Coder 3B', minVramMB: 4000, sizeHintGB: 2 },
+  { id: 'qwen2.5-coder:7b', label: 'Qwen2.5 Coder 7B', minVramMB: 8000, sizeHintGB: 4.7 },
+  { id: 'qwen2.5-coder:14b', label: 'Qwen2.5 Coder 14B', minVramMB: 14000, sizeHintGB: 9 },
+  { id: 'qwen2.5-coder:32b', label: 'Qwen2.5 Coder 32B', minVramMB: 24000, sizeHintGB: 20 },
+  { id: 'deepseek-coder-v2:16b', label: 'DeepSeek Coder V2 16B', minVramMB: 12000, sizeHintGB: 8.9 },
+  { id: 'llama3.1:8b', label: 'Llama 3.1 8B (general)', minVramMB: 8000, sizeHintGB: 4.9 }
+];
+
+app.get('/api/onboarding/catalog', async (_req: Request, res: Response) => {
+  let profile: any = null;
+  try {
+    profile = await getSystemProfile();
+  } catch {}
+  const vram = profile?.totalVramMB || 0;
+  const catalog = MODEL_CATALOG.map((m) => {
+    const preset = findModelPreset(m.id);
+    return { ...m, fitsHardware: !vram || vram >= m.minVramMB, notes: preset?.notes, family: preset?.family };
+  });
+  const recommended =
+    [...catalog].reverse().find((m) => m.fitsHardware && /coder/.test(m.id)) ||
+    catalog.find((m) => m.fitsHardware) ||
+    catalog[0];
+  res.json({ success: true, profile, catalog, recommendedId: recommended.id });
+});
+
+// Proxy an `ollama pull` with NDJSON progress passthrough (local Ollama only).
+app.post('/api/onboarding/pull', async (req: Request, res: Response) => {
+  const { model, endpoint } = req.body || {};
+  const name = String(model || '').trim();
+  if (!name || /[;&|`$]/.test(name)) {
+    return res.status(400).json({ error: 'A single model name is required' });
+  }
+  const base = String(endpoint || 'http://127.0.0.1:11434').replace(/\/$/, '');
+  let upstream: Awaited<ReturnType<typeof fetch>>;
+  try {
+    upstream = await fetch(`${base}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, stream: true }),
+      signal: AbortSignal.timeout(30 * 60 * 1000)
+    });
+  } catch (err: any) {
+    return res.status(502).json({ error: `Ollama unreachable at ${base}: ${String(err?.message || err)}` });
+  }
+  if (!upstream.ok || !upstream.body) {
+    const text = await upstream.text().catch(() => '');
+    return res.status(502).json({ error: `Pull failed (${upstream.status}): ${text.slice(0, 300)}` });
+  }
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(decoder.decode(value, { stream: true }));
+    }
+  } catch {
+    res.write(JSON.stringify({ error: 'stream interrupted' }) + '\n');
+  }
+  res.end();
 });
 
 // ---------------- BACKUP / REVERT (Phase 3 safety net) ----------------
@@ -1050,29 +1164,138 @@ app.get('/api/workspace/file-diff', (req: Request, res: Response) => {
   }
 });
 
+// P2.1: files captured in one checkpoint
+app.get('/api/workspace/checkpoint-files', (req: Request, res: Response) => {
+  const sessionId = (req.query.sessionId as string) || 'default';
+  const backupName = req.query.backupName as string;
+  if (!backupName) return res.status(400).json({ error: 'Missing backupName' });
+  try {
+    res.json({ files: listCheckpointFiles(getWorkspaceRoot(sessionId), backupName) });
+  } catch (err: any) {
+    if (err instanceof PathTraversalError) return res.status(403).json({ error: err.message });
+    res.status(404).json({ error: String(err?.message || err) });
+  }
+});
+
+// P4.2: local-only run telemetry (from .opencode/logs/runs.jsonl)
+app.get('/api/stats/runs', (req: Request, res: Response) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  const runs = readRunLog(process.cwd(), limit);
+  const completed = runs.filter((r) => !r.error);
+  const withEdits = runs.filter((r) => r.filesChanged?.length > 0);
+  const toolCounts: Record<string, { calls: number; fails: number }> = {};
+  for (const r of runs) {
+    for (const t of r.toolCalls || []) {
+      const e = (toolCounts[t.name] ||= { calls: 0, fails: 0 });
+      e.calls++;
+      if (!t.ok) e.fails++;
+    }
+  }
+  res.json({
+    success: true,
+    totals: {
+      runs: runs.length,
+      completed: completed.length,
+      completionRate: runs.length ? Number((completed.length / runs.length * 100).toFixed(1)) : null,
+      editRuns: withEdits.length,
+      avgDurationMs: runs.length ? Math.round(runs.reduce((s, r) => s + (r.durationMs || 0), 0) / runs.length) : null,
+      avgIterations: runs.length ? Number((runs.reduce((s, r) => s + (r.iterations || 0), 0) / runs.length).toFixed(1)) : null,
+      totalFilesChanged: runs.reduce((s, r) => s + (r.filesChanged?.length || 0), 0)
+    },
+    toolUsage: Object.entries(toolCounts)
+      .map(([name, v]) => ({ name, ...v }))
+      .sort((a, b) => b.calls - a.calls),
+    byMode: runs.reduce<Record<string, number>>((acc, r) => {
+      const m = String(r.taskMode || 'general');
+      acc[m] = (acc[m] || 0) + 1;
+      return acc;
+    }, {}),
+    runs: runs.slice(0, 50).map((r) => ({
+      runId: r.runId,
+      sessionId: r.sessionId,
+      startedAt: r.startedAt,
+      durationMs: r.durationMs,
+      iterations: r.iterations,
+      taskMode: r.taskMode,
+      modelId: r.modelId,
+      filesChangedCount: r.filesChanged?.length || 0,
+      toolCalls: r.toolCalls?.length || 0,
+      error: r.error
+    }))
+  });
+});
+
+// P5.4 docs site: markdown docs served from /docs
+const DOCS_DIR = path.join(process.cwd(), 'docs');
+const SAFE_DOC_NAME = /^[a-z0-9_-]{1,64}$/;
+
+app.get('/api/docs', (_req: Request, res: Response) => {
+  try {
+    const files = fs
+      .readdirSync(DOCS_DIR)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => ({
+        name: f.replace(/\.md$/, ''),
+        title: f
+          .replace(/\.md$/, '')
+          .split('-')
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(' ')
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ success: true, docs: files });
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message || err) });
+  }
+});
+
+app.get('/api/docs/:name', (req: Request, res: Response) => {
+  const name = String(req.params.name || '');
+  if (!SAFE_DOC_NAME.test(name)) return res.status(400).json({ error: 'Invalid doc name' });
+  const file = path.join(DOCS_DIR, `${name}.md`);
+  try {
+    res.json({ success: true, name, content: fs.readFileSync(file, 'utf-8') });
+  } catch {
+    res.status(404).json({ error: `Doc "${name}" not found` });
+  }
+});
+
+// P2.1: whole-step unified diff (checkpoint vs current disk)
+app.get('/api/workspace/checkpoint-diff', (req: Request, res: Response) => {
+  const sessionId = (req.query.sessionId as string) || 'default';
+  const backupName = req.query.backupName as string;
+  if (!backupName) return res.status(400).json({ error: 'Missing backupName' });
+  try {
+    const patches = computeCheckpointDiffs(getWorkspaceRoot(sessionId), backupName);
+    res.json({ patches });
+  } catch (err: any) {
+    if (err instanceof PathTraversalError) return res.status(403).json({ error: err.message });
+    res.status(404).json({ error: String(err?.message || err) });
+  }
+});
+
 const runControllers: Record<string, AbortController> = {};
 
-function buildWorkspaceIndex(root: string, maxChars = 7000): string {
-  const entries = walkWorkspace(root, { maxDepth: 12, maxFiles: 2000 }).filter((e) => !e.isDirectory);
-  const codeFiles = entries.filter((f) => TEXT_EXTENSIONS.has(path.extname(f.relPath).toLowerCase()));
-  let out = `Workspace root: ${root}\n${entries.length} files total, ${codeFiles.length} code files.\n`;
-  out += 'Code file index (path - top-level symbols):\n';
+// Cache the workspace index per root: it reads up to 400 files synchronously,
+// which is wasteful on every request and brutal on large repos. Invalidate via
+// TTL so edits made outside the watcher still show up within 30s.
+const workspaceIndexCache: Record<string, { text: string; builtAt: number }> = {};
+const WORKSPACE_INDEX_TTL_MS = 30_000;
 
-  const lines: string[] = [];
-  let used = out.length;
-  for (const f of codeFiles.slice(0, 400)) {
-    let syms: string[] = [];
-    try {
-      const buf = fs.readFileSync(f.absPath);
-      if (looksBinary(buf)) continue;
-      syms = extractOutline(f.absPath, buf.toString('utf-8')).slice(0, 8).map((s) => `${s.kind} ${s.name}`);
-    } catch {}
-    const line = `- ${f.relPath}${syms.length ? ` (${syms.join(', ')})` : ''}`;
-    if (used + line.length > maxChars) break;
-    lines.push(line);
-    used += line.length;
-  }
-  return out + lines.join('\n') + '\n';
+function buildWorkspaceIndex(root: string, maxChars = 7000): string {
+  const cached = workspaceIndexCache[root];
+  if (cached && Date.now() - cached.builtAt < WORKSPACE_INDEX_TTL_MS) return cached.text;
+  const text = buildWorkspaceIndexUncached(root, maxChars);
+  workspaceIndexCache[root] = { text, builtAt: Date.now() };
+  return text;
+}
+
+function buildWorkspaceIndexUncached(root: string, maxChars = 7000): string {
+  // P3.2: ranked repo map (recency + dependency fan-in + symbol presence)
+  // replaces the old first-400-alphabetical file listing.
+  const { text, scanned } = buildRepoMap(root, maxChars);
+  const header = `Workspace root: ${root}\nRanked code map (${scanned} files scanned; highest-signal first â€” recently changed and heavily imported files lead):\n`;
+  return text ? header + text + '\n' : header + '(no code files found)\n';
 }
 
 app.post('/api/agent/cancel', (req: Request, res: Response) => {
@@ -1099,6 +1322,37 @@ app.post('/api/agent/permission', (req: Request, res: Response) => {
     res.json({ success: true });
   } else {
     res.json({ success: false, message: 'No pending permission request' });
+  }
+});
+
+// P2.2: diff-review responses (accepted hunk ids per run)
+const pendingReviews: Record<string, (accepted: number[] | null) => void> = {};
+
+app.post('/api/agent/review', (req: Request, res: Response) => {
+  const { runId, accepted } = req.body || {};
+  const resolver = pendingReviews[String(runId)];
+  if (resolver) {
+    resolver(Array.isArray(accepted) ? accepted.map(Number).filter((n) => Number.isInteger(n)) : null);
+    delete pendingReviews[String(runId)];
+    res.json({ success: true });
+  } else {
+    res.json({ success: false, message: 'No pending review request' });
+  }
+});
+
+// P2.4: per-project rules stored in <workspace>/.devforge.json
+app.get('/api/project/config', (req: Request, res: Response) => {
+  const sessionId = String(req.query.sessionId || 'default');
+  res.json({ success: true, config: loadProjectConfig(getWorkspaceRoot(sessionId)) });
+});
+
+app.post('/api/project/config', (req: Request, res: Response) => {
+  const { sessionId = 'default', config } = req.body || {};
+  try {
+    const saved = saveProjectConfig(getWorkspaceRoot(String(sessionId)), config || {});
+    res.json({ success: true, config: saved });
+  } catch (e: any) {
+    res.status(400).json({ success: false, message: e?.message || 'Failed to save project config' });
   }
 });
 
@@ -1134,6 +1388,84 @@ async function resolveOllamaModelNumCtx(endpoint: string | undefined, modelId?: 
   return null;
 }
 
+// ---------------- P0.1: shared task-context resolver ----------------
+//
+// Both `/api/agent/stream` and `/api/agent/resume` must rebuild the exact same
+// system instruction (task params, persona, LTM, workspace index) so a resumed
+// run is indistinguishable from a fresh one given the same inputs. Centralise
+// that here instead of duplicating the template.
+async function resolveTaskContext(
+  sessionId: string,
+  prompt: string,
+  modelId: string,
+  modelEndpoint: string | undefined,
+  taskMode: unknown,
+  thinkingLevel: string
+): Promise<{
+  mode: TaskMode;
+  taskParams: ReturnType<typeof resolveTaskParams>;
+  systemContext: string;
+}> {
+  const mode: TaskMode = isTaskMode(taskMode) ? taskMode : 'general';
+  const profile = await getSystemProfile();
+  const largeModel = /(\d{2,}b|27b|32b|64k|70b)/i.test(modelId || '');
+  const taskParams = resolveTaskParams(mode, profile.recommendedContextTokens, { largeModel });
+
+  // P5.2 model compatibility matrix: apply family-tuned sampling deltas and
+  // context ceiling on top of the task-mode defaults.
+  const modelPreset = findModelPreset(modelId);
+  if (modelPreset) {
+    const { temperature, topP, repeatPenalty } = { ...taskParams, ...(modelPreset.sampling || {}) };
+    taskParams.temperature = temperature;
+    taskParams.topP = topP;
+    taskParams.repeatPenalty = repeatPenalty;
+    if (modelPreset.maxCtxTokens) {
+      taskParams.numCtxTokens = Math.min(taskParams.numCtxTokens, modelPreset.maxCtxTokens);
+    }
+  }
+
+  // Honour the model's own num_ctx setting instead of clamping to hardware estimate.
+  const ollamaCtx = await resolveOllamaModelNumCtx(modelEndpoint, modelId);
+  if (ollamaCtx) {
+    taskParams.numCtxTokens = ollamaCtx;
+  }
+
+  const relevantMemories = await retrieveRelevantMemories(prompt);
+  // eslint-disable-next-line no-control-regex
+  const ltmBlock =
+    relevantMemories.length > 0
+      ? `=== RELEVANT LONG-TERM PROJECT MEMORIES (LTM) ===\n` +
+        relevantMemories.map((m) => `- [${m.category}] ${m.key}: ${m.value}`).join('\n') +
+        `\n\n`
+      : '';
+
+  // P2.4: project rules from .devforge.json + AGENTS.md-style files
+  const projectRules = loadProjectInstructions(getWorkspaceRoot(sessionId));
+  const rulesBlock = projectRules
+    ? `=== PROJECT RULES (must be followed) ===\n${projectRules}\n\n`
+    : '';
+
+  const systemInstruction = `You are DevForge Agent, an expert software engineer working directly on a real filesystem workspace.
+
+=== HOW TO WORK ===
+1. PLAN FIRST: before any edits, briefly state a numbered plan of the changes you will make, then execute the items one by one in order.
+2. You have tools: list_files, search, read_file, file_outline, write_file, apply_patch, run_command, git_diff.
+3. ALWAYS investigate before editing. Prefer apply_patch for edits; write_file only for new files.
+4. EXPLORE EFFICIENTLY: use list_files/file_outline/search first (and semantic_search when available for meaning-based lookups). Never read_file an entire file larger than ~400 lines â€” read the specific ranges you need or work from its outline. Do not re-read a file you have already read unless it changed.
+5. BUDGET YOUR WORK: you have a limited number of iterations. Start editing as soon as you understand enough; do not exhaust your budget on exploration alone. If the task is large, complete the most important changes first and verify them.
+6. VERIFY with run_command (npm test / npm run lint / tsc --noEmit) when relevant.
+7. Summarize which files you changed and why.
+
+=== CONVERSATION RULES ===
+- Answer ONLY the latest user message; build on earlier turns.
+
+${taskParams.personaAddendum}
+${ltmBlock}${rulesBlock}${buildWorkspaceIndex(getWorkspaceRoot(sessionId))}
+Use tools to read any file's full contents on demand.`;
+
+  return { mode, taskParams, systemContext: systemInstruction };
+}
+
 app.post('/api/agent/stream', async (req: Request, res: Response) => {
   const {
     prompt,
@@ -1143,8 +1475,16 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
     attachments = [],
     thinkingLevel = 'none',
     taskMode,
-    writePolicy = 'ask' // 'ask' | 'allow' | 'deny'
+    writePolicy: clientWritePolicy, // 'ask' | 'allow' | 'deny' | 'review'; falls back to project config
+    runId: clientRunId,        // optional: reuse a prior snapshot's runId for resume
+    priorMessages              // optional: message list to seed the loop (resume path)
   } = req.body || {};
+
+  // P2.4: per-project default write policy from .devforge.json when unset by the client
+  const writePolicy =
+    clientWritePolicy ||
+    loadProjectConfig(getWorkspaceRoot(String(sessionId))).writePolicy ||
+    'ask';
 
   res.writeHead(200, {
     'Content-Type': 'application/x-ndjson',
@@ -1162,23 +1502,57 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
     return res.end();
   }
 
-  const mode: TaskMode = isTaskMode(taskMode) ? taskMode : 'general';
-  const profile = await getSystemProfile();
-  const largeModel = /(\d{2,}b|27b|32b|64k|70b)/i.test(modelId || '');
-  const taskParams = resolveTaskParams(mode, profile.recommendedContextTokens, { largeModel });
-
-  // Respect the model's own num_ctx setting (Ollama Modelfile PARAMETER num_ctx /
-  // "ollama run <model> --ctx") instead of clamping to the hardware estimate.
-  const ollamaCtx = await resolveOllamaModelNumCtx(modelEndpoint, modelId);
-  if (ollamaCtx) {
-    taskParams.numCtxTokens = ollamaCtx;
+  // P0.1: resume support â€” if the client passes `runId` we resume from that
+  // saved snapshot's message list (`priorMessages`), otherwise we start a
+  // fresh run with a new id.
+  const SAFE_RUN_ID = /^[A-Za-z0-9_-]{1,128}$/;
+  let runId: string;
+  let prior: any[] | undefined;
+  if (typeof clientRunId === 'string' && SAFE_RUN_ID.test(clientRunId)) {
+    runId = clientRunId;
+    if (Array.isArray(priorMessages) && priorMessages.length > 0) {
+      prior = priorMessages.slice(0, 200); // defensive cap; real cap lives in the loop
+    }
+  } else {
+    runId = `run-${cryptoRandomUUID()}`;
   }
+
+  const { mode, taskParams, systemContext } = await resolveTaskContext(
+    sessionId,
+    prompt,
+    modelId,
+    modelEndpoint,
+    taskMode,
+    thinkingLevel
+  );
 
   const controller = new AbortController();
   runControllers[sessionId] = controller;
   ensureWorkspaceWatcher(sessionId);
-  const runId = `run-${cryptoRandomUUID()}`;
   const startedAt = Date.now();
+
+  // P0.1: per-run message snapshot. Saved after every iteration; deleted on
+  // clean success, kept on cancel/error so the run can be resumed.
+  let seenFiles: string[] = [];
+  const persistSnapshot = (messages: any[]) => {
+    try {
+      saveRunState(process.cwd(), runId, {
+        v: 1,
+        runId,
+        sessionId,
+        prompt: prompt.slice(0, 4000),
+        modelId,
+        modelEndpoint,
+        thinkingLevel,
+        taskMode,
+        writePolicy,
+        iterations: 0, // updated from result.iterations on completion
+        filesChanged: seenFiles,
+        messages,
+        savedAt: new Date().toISOString()
+      });
+    } catch {}
+  };
 
   const history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   (req.body.history || []).forEach((msg: any) => {
@@ -1188,7 +1562,7 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
 
   // Cross-turn compaction: keep the last 8 turns verbatim; summarize-truncate
   // older turns to their head so long conversations don't drown the context.
-  const KEEP_VERBATIM = 16; // messages (˜8 turns)
+  const KEEP_VERBATIM = 16; // messages (8 turns)
   if (history.length > KEEP_VERBATIM) {
     const older = history.slice(0, -KEEP_VERBATIM);
     const recent = history.slice(-KEEP_VERBATIM);
@@ -1196,92 +1570,202 @@ app.post('/api/agent/stream', async (req: Request, res: Response) => {
       role: m.role,
       content:
         m.content.length > 300
-          ? m.content.slice(0, 300) + '…[earlier message truncated]'
+          ? m.content.slice(0, 300) + '[earlier message truncated]'
           : m.content
     }));
     history.length = 0;
     history.push(...compacted, ...recent);
   }
 
-  // Semantic retrieval: inject only the memories relevant to this prompt
-  const relevantMemories = await retrieveRelevantMemories(prompt);
-  const ltmBlock = relevantMemories.length > 0
-    ? `=== RELEVANT LONG-TERM PROJECT MEMORIES (LTM) ===\n` +
-      relevantMemories.map((m) => `- [${m.category}] ${m.key}: ${m.value}`).join('\n') + `\n\n`
-    : '';
-
-  const systemInstruction = `You are OpenCode Agent, an expert software engineer working directly on a real filesystem workspace.
-
-=== HOW TO WORK ===
-1. PLAN FIRST: before any edits, briefly state a numbered plan of the changes you will make, then execute the items one by one in order.
-2. You have tools: list_files, search, read_file, file_outline, write_file, apply_patch, run_command, git_diff.
-3. ALWAYS investigate before editing. Prefer apply_patch for edits; write_file only for new files.
-4. EXPLORE EFFICIENTLY: use list_files/file_outline/search first. Never read_file an entire file larger than ~400 lines — read the specific ranges you need or work from its outline. Do not re-read a file you have already read unless it changed.
-5. BUDGET YOUR WORK: you have a limited number of iterations. Start editing as soon as you understand enough; do not exhaust your budget on exploration alone. If the task is large, complete the most important changes first and verify them.
-6. VERIFY with run_command (npm test / npm run lint / tsc --noEmit) when relevant.
-7. Summarize which files you changed and why.
-
-=== CONVERSATION RULES ===
-- Answer ONLY the latest user message; build on earlier turns.
-
-${taskParams.personaAddendum}
-${ltmBlock}${buildWorkspaceIndex(getWorkspaceRoot(sessionId))}
-Use tools to read any file's full contents on demand.`;
-
-  const runLoop = (loopPrompt: string) =>
-    runAgentLoop({
-      root: getWorkspaceRoot(sessionId),
-      prompt: loopPrompt,
-      modelId,
-      endpoints: [...new Set([modelEndpoint, 'http://127.0.0.1:11434', 'http://localhost:11434', 'http://127.0.0.1:1234'].filter(Boolean))] as string[],
-      history,
-      systemContext: systemInstruction,
-      maxIterations: Math.max(taskParams.maxIterations, thinkingLevel === 'high' ? 8 : 0),
-      sessionId,
-      thinkingLevel,
-      sampling: {
-        temperature: taskParams.temperature,
-        topP: taskParams.topP,
-        repeatPenalty: taskParams.repeatPenalty,
-        numCtxTokens: taskParams.numCtxTokens
-      },
-      signal: controller.signal,
-      onEvent: (evt: LoopEvent) => send(evt as any),
-      requestPermission: async (_toolName, args) => {
-        if (writePolicy === 'allow') return true;
-        if (writePolicy === 'deny') return false;
-        // RE4: pause loop until user answers via /api/agent/permission
-        send({
-          type: 'permission_request',
-          runId,
-          toolName: _toolName,
-          summary: _toolName === 'run_command' ? String(args.command || '') : String(args.path || '')
-        });
-        return await new Promise<boolean>((resolve) => {
-          pendingPermissions[runId] = resolve;
-        });
+  const loopOpts = {
+    root: getWorkspaceRoot(sessionId),
+    modelId,
+    endpoints: [...new Set([modelEndpoint, 'http://127.0.0.1:11434', 'http://localhost:11434', 'http://127.0.0.1:1234'].filter(Boolean))] as string[],
+    history,
+    systemContext,
+    maxIterations: Math.max(taskParams.maxIterations, thinkingLevel === 'high' ? 12 : 0),
+    sessionId,
+    // P1.5a: durable task ledger bound to this run
+    runId,
+    // P3.1: semantic code retrieval tool (local embeddings, keyword fallback)
+    semanticSearch: async (query: string, k?: number) => {
+      const { chunks, mode } = await retrieveCode(getWorkspaceRoot(sessionId), query, k);
+      return renderRetrieval(chunks, mode);
+    },
+    // P3.3: read-only explore subagent (own iteration budget, cannot edit)
+    runSubagent: async (question: string) => {
+      const { runExploreSubagent } = await import('./server/subagents');
+      const sub = await runExploreSubagent({
+        root: getWorkspaceRoot(sessionId),
+        endpoints: [...new Set([modelEndpoint, 'http://127.0.0.1:11434', 'http://localhost:11434', 'http://127.0.0.1:1234'].filter(Boolean))] as string[],
+        modelId,
+        question,
+        semanticSearch: async (q, kk) => {
+          const r = await retrieveCode(getWorkspaceRoot(sessionId), q, kk);
+          return renderRetrieval(r.chunks, r.mode);
+        }
+      });
+      return `[subagent report Â· ${sub.iterations} iterations${sub.stoppedEarly ? ' Â· HIT ITS OWN BUDGET (report may be incomplete)' : ''}]\n${sub.report}`;
+    },
+    // P1.5e edit validation gate: cheap syntax/import checks before any write hits disk
+    validateEdit: async (relPath: string, newContent: string) => {
+      const r = await validateEditedContent(getWorkspaceRoot(sessionId), relPath, newContent);
+      return r.ok ? null : r.errors.join('\n');
+    },
+    // P1.2 auto-verify / self-heal: enable when the workspace has detectable
+    // verify commands (package.json scripts, tsconfig, pytest config)
+    ...(detectVerifyCommands(getWorkspaceRoot(sessionId)).length
+      ? {
+          autoVerify: {
+            commands: detectVerifyCommands(getWorkspaceRoot(sessionId)),
+            maxHealAttempts: 3
+          }
+        }
+      : {}),
+    thinkingLevel,
+    // P0.1: if the client resumed from a snapshot, seed the loop with the
+    // saved message list so the model continues instead of re-exploring.
+    ...(prior ? { priorMessages: prior } : {}),
+    sampling: {
+      temperature: taskParams.temperature,
+      topP: taskParams.topP,
+      repeatPenalty: taskParams.repeatPenalty,
+      numCtxTokens: taskParams.numCtxTokens
+    },
+    signal: controller.signal,
+    onEvent: (evt: LoopEvent) => {
+      if (evt.type === 'files_changed') {
+        for (const f of evt.files) if (!seenFiles.includes(f)) seenFiles.push(f);
       }
-    });
+      send(evt as any);
+    },
+    // P0.1: persist the message list after every iteration so a crash/cancel
+    // leaves a resumable snapshot on disk. `seenFiles` is mutated in place so
+    // the closure always sees the latest progress.
+    onMessages: (msgs) => persistSnapshot(msgs),
+    requestPermission: async (_toolName: string, args: Record<string, any>) => {
+      if (writePolicy === 'allow') return true;
+      if (writePolicy === 'deny') return false;
+      // P2.2: in review mode non-edit tools (e.g. run_command) still ask;
+      // write_file/apply_patch were already gated by the hunk-level review.
+      if (writePolicy === 'review' && _toolName !== 'run_command') return true;
+      // RE4: pause loop until user answers via /api/agent/permission
+      send({
+        type: 'permission_request',
+        runId,
+        toolName: _toolName,
+        summary: _toolName === 'run_command' ? String(args.command || '') : String(args.path || '')
+      });
+      return await new Promise<boolean>((resolve) => {
+        pendingPermissions[runId] = resolve;
+      });
+    },
+    // P2.2 diff-review gate (only in 'review' write policy): the user accepts/
+    // rejects individual hunks; only accepted hunks are executed.
+    ...(writePolicy === 'review'
+      ? {
+          reviewEdit: async (call: any) => {
+            const proposal = buildEditProposal(getWorkspaceRoot(sessionId), call.name, call.arguments);
+            if ('error' in proposal) {
+              send({ type: 'token', delta: `\n\n[diff review unavailable: ${proposal.error}]` });
+              return null;
+            }
+            send({
+              type: 'edit_review_request',
+    runId,
+    // P5.3: user-defined plugin tools from .devforge.json
+    ...(getPluginToolDefs(getWorkspaceRoot(sessionId)).length
+      ? {
+          pluginTools: getPluginToolDefs(getWorkspaceRoot(sessionId)).map((def) => ({
+            name: def.name,
+            schema: buildPluginSchemas([def])[0],
+            execute: (args: Record<string, unknown>) => executePluginTool(getWorkspaceRoot(sessionId), def, args)
+          }))
+        }
+      : {}),
+              toolName: call.name,
+              path: proposal.path,
+              isNewFile: proposal.isNewFile,
+              hunks: proposal.hunks
+            });
+            const accepted = await new Promise<number[] | null>((resolve) => {
+              pendingReviews[runId] = resolve;
+            });
+            if (!accepted || !accepted.length) return null;
+            const args = reviewedArgs(proposal, accepted);
+            return args ? { ...call, arguments: args } : null;
+          }
+        }
+      : {}),
+    // P1.5d git-first workflow: auto-commit each verified step (best-effort)
+    onStepVerified: async (files: string[], summary: string) => {
+      try {
+        const res = await commitVerifiedStep(
+          getWorkspaceRoot(sessionId),
+          files,
+          `DevForge(${runId.slice(0, 8)}): ${summary || files.join(', ')}`
+        );
+        if (res.ok && res.commit) {
+          send({ type: 'token', delta: `\n\nðŸ“Œ Committed verified step \`${res.commit}\` (${files.length} file${files.length > 1 ? 's' : ''})` });
+        }
+      } catch {
+        /* git workflow is best-effort */
+      }
+    }
+  };
+  const runLoop = (loopPrompt: string) => runAgentLoop({ ...loopOpts, prompt: loopPrompt });
+  // P2.3: latest structured plan submitted via update_plan (for final graphState)
+  let latestPlanSteps: Array<{ text: string; status: string }> | null = null;
+  void latestPlanSteps;
+  Object.assign(loopOpts, {
+    onPlanUpdate: (steps: Array<{ text: string; status: string }>) => {
+      latestPlanSteps = steps.map((s) => ({ text: s.text, status: s.status }));
+    }
+  });
 
     // Auto-continue: if the model exhausted its iteration budget without a final
     // answer, keep going instead of silently stopping (up to 5 extra passes).
     try {
+    // P1.5d: dedicated work branch + dirty-state checkpoint commit for git workspaces
+    try {
+      const branchInfo = await ensureRunBranch(getWorkspaceRoot(sessionId), runId);
+      if (branchInfo) {
+        send({
+          type: 'token',
+          delta: `\n\nðŸŒ¿ Working on branch \`${branchInfo.branch}\` (base: ${branchInfo.baseBranch})${branchInfo.createdCheckpointCommit ? ' â€” pre-run changes checkpointed' : ''}`
+        });
+      }
+    } catch {}
     let result = await runLoop(prompt);
     let continuations = 0;
     while (result.hitIterationCap && !controller.signal.aborted && continuations < 5) {
       continuations++;
-      send({ type: 'token', delta: `\n\n? Iteration budget reached — continuing automatically (pass ${continuations + 1})…\n\n` });
+      send({ type: 'token', delta: `\n\nIteration budget reached â€” continuing automatically (pass ${continuations + 1})` });
       const before = result.filesChanged.length;
-      const next = await runLoop(
-        'Continue your previous work. Do not repeat completed steps. Finish any remaining edits, verify them, then give your final summary.'
-      );
+      // Re-embed the original task: pass 1's task prompt is NOT in `history`
+      // (it rode alone in pass 1's last user message, which this prompt replaces),
+      // so a generic "continue" instruction loses the task entirely and the model
+      // replies "there is no previous work to continue". Keep up to 2000 chars so
+      // multi-part tasks don't lose requirements in continuation passes.
+      const task = prompt.length > 2000 ? prompt.slice(0, 2000) + '\u2026' : prompt;
+      const next = await runAgentLoop({
+        ...loopOpts,
+        prompt: `Original task: ${task}\n\nContinue that task from where it left off. Do not repeat completed steps. Finish any remaining work, verify it, then give your final summary.`,
+        // Resume with pass 1's full message list (tool calls + results) so the
+        // model continues from where it stopped instead of re-exploring.
+        priorMessages: result.messages
+      });
       result = {
         reply: next.reply || result.reply,
         iterations: result.iterations + next.iterations,
         toolCalls: [...result.toolCalls, ...next.toolCalls],
         filesChanged: [...new Set([...result.filesChanged, ...next.filesChanged])],
         usedTools: result.usedTools || next.usedTools,
-        hitIterationCap: false
+        // Carry through whether the continuation ALSO hit its cap, so the
+        // loop can keep auto-continuing (up to 5 passes) instead of stopping
+        // after the first exhausted budget.
+        hitIterationCap: next.hitIterationCap === true,
+        messages: next.messages || result.messages
       };
       if (next.filesChanged.length === before && !next.usedTools) break; // model has nothing left to do
     }
@@ -1301,18 +1785,29 @@ Use tools to read any file's full contents on demand.`;
 
     const lspDiagnostics: LSPDiagnostic[] = await runWorkspaceDiagnostics(sessionId);
 
-    // Surface the agent's numbered plan (if it stated one) as pipeline nodes so
-    // the Agent Pipeline tab shows real progress instead of a canned sequence.
-    const planItems = (result.reply.match(/^\s*\d+[.)]\s+(.{3,140})/gm) || [])
-      .map((l) => l.replace(/^\s*\d+[.)]\s+/, '').trim())
-      .filter((t) => !/^https?:/.test(t))
-      .slice(0, 8);
+    // P2.3: prefer the agent's STRUCTURED plan (update_plan events) over
+    // regex-scraped numbered prose for the final pipeline graph.
+    const structured = latestPlanSteps && latestPlanSteps.length ? latestPlanSteps : null;
+    const planItems = structured
+      ? structured.map((s) => s.text)
+      : (result.reply.match(/^\s*\d+[.)]\s+(.{3,140})/gm) || [])
+          .map((l: string) => l.replace(/^\s*\d+[.)]\s+/, '').trim())
+          .filter((t: string) => !/^https?:/.test(t))
+          .slice(0, 8);
+    const planStatusFor = (i: number): 'success' | 'failed' | 'pending' => {
+      if (!structured) return i < Math.min(planItems.length, 8) ? 'success' : 'pending';
+      const st = structured[i]?.status;
+      if (st === 'completed') return 'success';
+      if (st === 'in_progress' || !st) return 'success';
+      return 'pending';
+    };
     const graphState: LangGraphNodeState[] = [
       { id: 'analyze_context', label: '1. Analyze Context & Prompt', status: 'success', durationMs: 40 },
       ...planItems.map((item, i) => ({
         id: `plan-${i}`,
-        label: `Plan ${i + 1}. ${item.length > 70 ? item.slice(0, 67) + '…' : item}`,
-        status: 'success' as const
+        label: `${item.length > 70 ? item.slice(0, 67) + 'â€¦' : item}`,
+        status: planStatusFor(i),
+        ...(structured?.[i]?.status === 'in_progress' ? { message: 'in progress' } : {})
       })),
       {
         id: 'execute_tools',
@@ -1350,6 +1845,11 @@ Use tools to read any file's full contents on demand.`;
         timestamp: new Date().toISOString()
       }
     });
+
+    // P0.1: clean success â€” remove the per-run snapshot so it does not show
+    // up as a "pending resume". A crash / cancel path leaves the file behind,
+    // and the user can pick it up via /api/agent/pending-resumes.
+    try { deleteRunState(process.cwd(), runId); } catch {}
   } catch (err: any) {
     if (controller.signal.aborted || err?.message === 'cancelled') {
       send({ type: 'error', error: 'cancelled' });
@@ -1359,13 +1859,80 @@ Use tools to read any file's full contents on demand.`;
   } finally {
     delete runControllers[sessionId];
     delete pendingPermissions[runId];
+    if (pendingReviews[runId]) {
+      try { pendingReviews[runId](null); } catch {}
+      delete pendingReviews[runId];
+    }
     res.end();
   }
 });
 
 
+// ---------------- P0.2: resume + pending-resumes endpoints ----------------
+//
+// `POST /api/agent/resume` re-runs a crashed/cancelled run from its last
+// snapshot. The saved message list is fed back via `priorMessages`, so the
+// model continues with full memory of prior tool activity instead of
+// re-exploring the workspace.
+app.post('/api/agent/resume', async (req: Request, res: Response) => {
+  const { runId } = req.body || {};
+  if (!runId) {
+    return res.status(400).json({ error: 'runId is required' });
+  }
+  const state = loadRunState(process.cwd(), String(runId));
+  if (!state) {
+    return res.status(404).json({ error: 'No run snapshot found for that runId' });
+  }
+  // Mark as consumed so it stops showing up in /api/agent/pending-resumes.
+  deleteRunState(process.cwd(), String(runId));
+  return res.status(200).json(state);
+});
+
+// `GET /api/agent/pending-resumes` lists resumable snapshots (most recent
+// first) without returning the (large) message payloads.
+app.get('/api/agent/pending-resumes', async (_req: Request, res: Response) => {
+  const list = listRunStates(process.cwd());
+  return res.json({ items: list, count: list.length });
+});
+
+
 // Vite Middleware for development & static serving for production
 async function startServer() {
+  // P4.4: LAN access is opt-in. DEVFORGE_HOST=lan (or HOST=0.0.0.0) binds all
+  // interfaces and gates every request behind a shared auth token.
+  const lanRequested =
+    process.env.DEVFORGE_HOST === 'lan' ||
+    process.env.HOST === '0.0.0.0' ||
+    process.env.HOST === 'lan';
+
+  if (lanRequested) {
+    const token = getOrCreateToken(process.cwd());
+    const secureCookie = process.env.LAN_COOKIE_SECURE === '1';
+    app.use(createLanGate(token, {
+      secureCookie,
+      maxAttemptsPerWindow: Number(process.env.LAN_MAX_ATTEMPTS) || 10,
+      windowMs: Number(process.env.LAN_WINDOW_MS) || 60_000,
+      lockMs: Number(process.env.LAN_LOCK_MS) || 60_000,
+    }));
+    const urls = [`http://localhost:${PORT}?token=${token}`].concat(
+      lanAddresses().map((ip) => `http://${ip}:${PORT}?token=${token}`)
+    );
+    (app as any).__devforgeLanUrls = urls;
+    console.log(`ðŸŒ DevForge Studio listening on LAN with auth token:`);
+    for (const u of urls) console.log(`   ${u}`);
+    console.log(`   (mutating requests require the X-DevForge-Csrf header; the UI sends it automatically.)`);
+    await serveUi();
+    app.listen(PORT, '0.0.0.0', () => {});
+    return;
+  }
+
+  await serveUi();
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`ðŸš€ DevForge Studio server running on http://127.0.0.1:${PORT} (local only)`);
+  });
+}
+
+async function serveUi() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1379,10 +1946,6 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
-
-  app.listen(PORT, '127.0.0.1', () => {
-    console.log(`ðŸš€ DevForge Studio server running on http://127.0.0.1:${PORT} (local only)`);
-  });
 }
 
 export { app };

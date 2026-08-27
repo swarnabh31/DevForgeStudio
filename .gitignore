@@ -1,16 +1,29 @@
 node_modules/
 build/
 dist/
+release/
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
 
-benchmark/results/
+# Runtime state & caches
 .opencode/
+.ruff_cache/
+__pycache__/
+.snapshot/
+snapshot/
 
+# Local working docs
 Memory.md
 plan.md
 
+# Internal-only benchmark harness (published results live in BENCHMARK.md / benchmark/results/)
 benchmark/run-benchmark.ts
+bun.lock
+bun.lockb
+
+# OS clutter
+Thumbs.db
+desktop.ini

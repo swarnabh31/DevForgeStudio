@@ -13,7 +13,15 @@ import { LspPanel } from './components/LspPanel';
 import { MultiSessionManager } from './components/MultiSessionManager';
 import { ModelSelectorModal } from './components/ModelSelectorModal';
 import { SettingsModal } from './components/SettingsModal';
+import { ProjectRulesModal } from './components/ProjectRulesModal';
+import { StatsDashboard } from './components/StatsDashboard';
+import { OnboardingWizard } from './components/OnboardingWizard';
+import { TaskBoard } from './components/TaskBoard';
+import { DocsPanel } from './components/DocsPanel';
 import { MemoryInspector } from './components/MemoryInspector';
+import { CheckpointTimeline } from './components/CheckpointTimeline';
+import { EditReviewModal, PendingReview } from './components/EditReviewModal';
+import { LiveDashboard, PlanStep, ToolFeedEntry, IterStat } from './components/LiveDashboard';
 import { FirstRunGuide } from './components/FirstRunGuide';
 
 import { 
@@ -44,9 +52,19 @@ export default function App() {
   const [isScanningModels, setIsScanningModels] = useState<boolean>(false);
   const [livePlan, setLivePlan] = useState<string[]>([]);
   const [liveIteration, setLiveIteration] = useState<number>(0);
+  // P1.5c: live context budget meter fed by `context_usage` stream events
+  const [contextUsage, setContextUsage] = useState<{ usedTokens: number; budgetTokens: number } | null>(null);
+  // P2.3 live dashboard state (all from structured events)
+  const [dashPlan, setDashPlan] = useState<PlanStep[]>([]);
+  const [dashToolFeed, setDashToolFeed] = useState<ToolFeedEntry[]>([]);
+  const [dashFiles, setDashFiles] = useState<string[]>([]);
+  const [dashIterStats, setDashIterStats] = useState<IterStat[]>([]);
   const [taskMode, setTaskMode] = useState<TaskMode>('coding');
+  // P2.2: write policy — 'review' gates every edit behind per-hunk diff review
+  const [writePolicy, setWritePolicy] = useState<'ask' | 'allow' | 'deny' | 'review'>('ask');
+  const [pendingReview, setPendingReview] = useState<PendingReview | null>(null);
   const [systemProfile, setSystemProfile] = useState<SystemProfile | null>(null);
-  const [activeTab, setActiveTab] = useState<'chat' | 'graph' | 'lsp' | 'memory'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'graph' | 'lsp' | 'memory' | 'checkpoints' | 'stats' | 'board' | 'docs'>('chat');
   const [longTermMemories, setLongTermMemories] = useState<LongTermMemoryItem[]>([]);
 
   // Memory Handlers
@@ -135,9 +153,17 @@ export default function App() {
   const [prerequisitesReady, setPrerequisitesReady] = useState(true);
 
   // Multi-Session Management with localStorage Persistence
+  // (legacy "opencode_*" keys are migrated to "devforge_*" on first read)
   const [sessions, setSessions] = useState<AgentSession[]>(() => {
     try {
-      const saved = localStorage.getItem('opencode_sessions');
+      let saved = localStorage.getItem('devforge_sessions');
+      if (!saved) {
+        saved = localStorage.getItem('opencode_sessions');
+        if (saved) {
+          localStorage.setItem('devforge_sessions', saved);
+          localStorage.removeItem('opencode_sessions');
+        }
+      }
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -178,7 +204,11 @@ What would you like to build or inspect today?`,
 
   const [activeSessionId, setActiveSessionId] = useState<string>(() => {
     try {
-      const saved = localStorage.getItem('opencode_active_session_id');
+      let saved = localStorage.getItem('devforge_active_session_id');
+      if (!saved) {
+        saved = localStorage.getItem('opencode_active_session_id');
+        if (saved) localStorage.setItem('devforge_active_session_id', saved);
+      }
       if (saved) return saved;
     } catch (e) {}
     return 'session-default-1';
@@ -212,21 +242,23 @@ What would you like to build or inspect today?`,
   };
 
   const [targetFolderPath, setTargetFolderPath] = useState<string>(() => {    try {
-      return localStorage.getItem('opencode_target_folder') || '';
+      const saved = localStorage.getItem('devforge_target_folder') || localStorage.getItem('opencode_target_folder') || '';
+      if (saved) localStorage.setItem('devforge_target_folder', saved);
+      return saved;
     } catch {
       return '';
     }
   });
   useEffect(() => {
     try {
-      localStorage.setItem('opencode_target_folder', targetFolderPath);
+      localStorage.setItem('devforge_target_folder', targetFolderPath);
     } catch {}
   }, [targetFolderPath]);
 
   // Sync sessions to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem('opencode_sessions', JSON.stringify(sessions));
+      localStorage.setItem('devforge_sessions', JSON.stringify(sessions));
     } catch (e) {
       console.warn('Failed to sync sessions to localStorage:', e);
     }
@@ -279,7 +311,7 @@ What would you like to build or inspect today?`,
   // Sync activeSessionId to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem('opencode_active_session_id', activeSessionId);
+      localStorage.setItem('devforge_active_session_id', activeSessionId);
     } catch (e) {}
   }, [activeSessionId]);
 
@@ -304,6 +336,23 @@ What would you like to build or inspect today?`,
   // Modals
   const [isModelModalOpen, setIsModelModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isProjectRulesOpen, setIsProjectRulesOpen] = useState(false);
+  // P4.1: onboarding wizard auto-opens once on first visit
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(() => {
+    try {
+      return !localStorage.getItem('devforge_onboardingDone');
+    } catch {
+      return false;
+    }
+  });
+  const [chatDraft, setChatDraft] = useState<{ text: string; id: number } | null>(null);
+
+  const closeOnboarding = () => {
+    setIsOnboardingOpen(false);
+    try {
+        localStorage.setItem('devforge_onboardingDone', '1');
+    } catch {}
+  };
 
   // Settings
   const [settings, setSettings] = useState<SystemSettings>({
@@ -517,7 +566,9 @@ What would you like to build or inspect today?`,
     );
 
     const currentSession = sessions.find((s) => s.id === activeSessionId);
-    const sessionHistory = [...(currentSession?.messages || [])];
+    // Include the message we just appended (the render-time `sessions` closure
+    // is one turn behind setSessions above).
+    const sessionHistory = [...(currentSession?.messages || []), userMsg];
 
     // Streaming run: placeholder agent message updated token-by-token
     const agentMsgId = `msg-agent-${Date.now()}`;
@@ -549,6 +600,11 @@ What would you like to build or inspect today?`,
     try {
       setLivePlan([]);
       setLiveIteration(0);
+      setContextUsage(null);
+      setDashPlan([]);
+      setDashToolFeed([]);
+      setDashFiles([]);
+      setDashIterStats([]);
       const localAbort = new AbortController();
       streamAbortRef.current = localAbort;
 
@@ -564,6 +620,7 @@ What would you like to build or inspect today?`,
           attachments,
           thinkingLevel,
           taskMode,
+          writePolicy,
           history: sessionHistory.map((m) => ({
             sender: m.sender,
             content: m.content
@@ -594,8 +651,29 @@ What would you like to build or inspect today?`,
           if (evt.type === 'plan') {
             setLivePlan(evt.items || []);
             setLiveIteration(0);
+          } else if (evt.type === 'plan_update') {
+            // P1.3 structured plan events (preferred over regex-scraped prose)
+            const steps = evt.steps || [];
+            setLivePlan(steps.map((s: any) => `${s.status === 'completed' ? '✓' : s.status === 'in_progress' ? '▸' : '○'} ${s.text}`));
+            setLiveIteration(steps.filter((s: any) => s.status === 'completed').length);
+            setDashPlan(steps.map((s: any) => ({ text: s.text, status: s.status })));
           } else if (evt.type === 'iteration') {
             setLiveIteration(evt.index);
+            setDashToolFeed((prev) => prev); // feed updated on tool_call/tool_result
+          } else if (evt.type === 'iteration_end') {
+            setDashIterStats((prev) => [
+              ...prev.slice(-29),
+              {
+                index: evt.index,
+                durationMs: evt.durationMs || 0,
+                promptEvalMs: (evt as any).promptEvalMs,
+                promptEvalTokens: (evt as any).promptEvalTokens
+              }
+            ]);
+          } else if (evt.type === 'tool_call') {
+            setDashToolFeed((prev) => [...prev, { name: evt.name, ok: undefined }]);
+          } else if (evt.type === 'context_usage') {
+            setContextUsage({ usedTokens: evt.usedTokens || 0, budgetTokens: evt.budgetTokens || 0 });
           } else if (evt.type === 'token') {
             streamingContent += evt.delta;
             appendAgentMsg({ content: streamingContent });
@@ -603,9 +681,23 @@ What would you like to build or inspect today?`,
             appendAgentMsg({
               content: `${streamingContent}\n\n🔧 \`${evt.name}\`…`
             });
+            setDashToolFeed((prev) => [...prev, { name: evt.name, ok: undefined }]);
+          } else if (evt.type === 'tool_result') {
+            setDashToolFeed((prev) => {
+              const next = [...prev];
+              for (let i = next.length - 1; i >= 0; i--) {
+                if (next[i].ok === undefined && next[i].name === evt.result?.name) {
+                  next[i] = { ...next[i], ok: !!evt.result?.ok };
+                  break;
+                }
+              }
+              return next;
+            });
+          } else if (evt.type === 'files_changed' && Array.isArray(evt.files)) {
+            setDashFiles(evt.files);
           } else if (evt.type === 'permission_request') {
             const ok = window.confirm(
-              `OpenCode Agent requests permission:\n\n${evt.toolName}: ${evt.summary}\n\nAllow this action?`
+              `DevForge Agent requests permission:\n\n${evt.toolName}: ${evt.summary}\n\nAllow this action?`
             );
             fetch('/api/agent/permission', {
               method: 'POST',
@@ -613,12 +705,28 @@ What would you like to build or inspect today?`,
               body: JSON.stringify({ runId: evt.runId, allowed: ok })
             }).catch(() => {});
             if (!ok) streamingContent += `\n\n🚫 Permission denied for \`${evt.toolName}\`.`;
+          } else if (evt.type === 'edit_review_request') {
+            setPendingReview({
+              runId: evt.runId,
+              toolName: evt.toolName,
+              path: evt.path,
+              isNewFile: !!evt.isNewFile,
+              hunks: evt.hunks || []
+            });
           } else if (evt.type === 'files_changed') {
             // refresh workspace cache live
             fetch(`/api/workspace/files?sessionId=${activeSessionId}`)
               .then((r) => r.json())
               .then((d) => d.files && setWorkspaceFiles(d.files))
               .catch(() => {});
+          } else if (evt.type === 'verify_start') {
+            streamingContent += `\n\n🔍 Verifying (${(evt.commands || []).join(', ')})…`;
+            appendAgentMsg({ content: streamingContent });
+          } else if (evt.type === 'verify_result') {
+            streamingContent += evt.ok
+              ? `\n✅ Verification passed`
+              : `\n❌ Verification failed — auto-healing…`;
+            appendAgentMsg({ content: streamingContent });
           } else if (evt.type === 'done') {
             donePayload = evt.payload;
           } else if (evt.type === 'error') {
@@ -656,6 +764,10 @@ What would you like to build or inspect today?`,
             : s
         )
       );
+      notifyIfBackground(
+        `✅ ${activeSession.name} finished`,
+        (finalContent || 'Task completed.').slice(0, 120)
+      );
     } catch (err) {
       console.error('Agent execution error:', err);
       const errorMsg: ChatMessage = {
@@ -681,6 +793,7 @@ What would you like to build or inspect today?`,
           return s;
         })
       );
+      notifyIfBackground(`⚠ ${activeSession.name} failed`, String((err as Error)?.message || 'Run failed').slice(0, 120));
     } finally {
       setIsAgentRunning(false);
     }
@@ -689,6 +802,20 @@ What would you like to build or inspect today?`,
   // Quick prompt action trigger
   const handleQuickAction = (actionText: string) => {
     handleSendMessage(actionText, []);
+  };
+
+  // P4.3: desktop notification for background runs (only when tab is hidden)
+  const notifyIfBackground = (title: string, body: string) => {
+    try {
+      if (!document.hidden || typeof Notification === 'undefined') return;
+      if (Notification.permission === 'granted') {
+        new Notification(title, { body });
+      } else if (Notification.permission === 'default') {
+        Notification.requestPermission().then((p) => {
+          if (p === 'granted') new Notification(title, { body });
+        });
+      }
+    } catch {}
   };
 
   // Command Execution in Sandbox
@@ -1055,6 +1182,8 @@ What would you like to build or inspect today?`,
         isScanningModels={isScanningModels}
         taskMode={taskMode}
         onTaskModeChange={setTaskMode}
+        writePolicy={writePolicy}
+        onWritePolicyChange={setWritePolicy}
         systemProfile={systemProfile}
         sessions={sessions}
         activeSessionId={activeSessionId}
@@ -1106,9 +1235,12 @@ What would you like to build or inspect today?`,
           <div className="flex flex-col xl:flex-row gap-0 w-full items-stretch">
             <div className="flex-1 min-w-0 flex flex-col" style={workspaceWidth !== null ? { maxWidth: `calc(100% - ${workspaceWidth}px)` } : undefined}>
               {activeTab === 'chat' && !isScanningModels && availableModels.length === 0 && (
-                <FirstRunGuide onRescan={() => scanAndDetectLocalModels()} isScanning={isScanningModels} />
-              )}
-              <ChatInterface
+                <FirstRunGuide
+                  onRescan={() => scanAndDetectLocalModels()}
+                  isScanning={isScanningModels}
+                  onOpenWizard={() => setIsOnboardingOpen(true)}
+                />
+              )}              <ChatInterface
                 messages={activeSession.messages}
                 onSendMessage={handleSendMessage}
                 isProcessing={isAgentRunning}
@@ -1120,6 +1252,7 @@ What would you like to build or inspect today?`,
                 onStopAgent={() => handleStopAgent(activeSessionId)}
                 onPauseAgent={() => handlePauseAgent(activeSessionId)}
                 onResumeAgent={() => handleResumeAgent(activeSessionId)}
+                draftToInject={chatDraft}
               />
             </div>
 
@@ -1155,6 +1288,14 @@ What would you like to build or inspect today?`,
         )}
 
         {activeTab === 'graph' && (
+          <>
+          <LiveDashboard
+            planSteps={dashPlan}
+            toolFeed={dashToolFeed}
+            filesTouched={dashFiles}
+            iterStats={dashIterStats}
+            contextUsage={contextUsage}
+          />
           <AgentGraphVisualizer
             nodes={
               isAgentRunning && livePlan.length > 0
@@ -1181,7 +1322,9 @@ What would you like to build or inspect today?`,
                   ]
             }
             currentSessionName={activeSession.name}
+            contextUsage={contextUsage}
           />
+          </>
         )}
 
         {activeTab === 'lsp' && (
@@ -1199,7 +1342,7 @@ What would you like to build or inspect today?`,
             shortTermMemory={{
               activeSessionId,
               activeFilePath,
-              activeDirectoryPath: 'OpenCode Workspace',
+              activeDirectoryPath: 'DevForge Workspace',
               totalWorkspaceFiles: Object.keys(workspaceFiles).length,
               recentActionsCount: activeSession?.messages.filter((m) => m.actions && m.actions.length > 0).length || 0,
               activeDiagnosticErrorsCount: diagnostics.filter((d) => d.severity === 'error').length,
@@ -1225,10 +1368,48 @@ ${longTermMemories.map((m) => `• [${m.category.toUpperCase()}] ${m.key}: ${m.v
 ==================================================`}
           />
         )}
+
+        {activeTab === 'checkpoints' && (
+          <CheckpointTimeline
+            sessionId={activeSessionId}
+            onReverted={() => handleRefreshApp()}
+          />
+        )}
+
+        {activeTab === 'stats' && <StatsDashboard />}
+
+        {activeTab === 'board' && (
+          <TaskBoard
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            onSelectSession={(id) => {
+              setActiveSessionId(id);
+              setActiveTab('chat');
+            }}
+            onStopAgent={handleStopAgent}
+            onPauseAgent={handlePauseAgent}
+            onResumeAgent={handleResumeAgent}
+          />
+        )}
+
+        {activeTab === 'docs' && <DocsPanel />}
       </main>
 
 
       {/* Modals */}
+      {pendingReview && (
+        <EditReviewModal
+          review={pendingReview}
+          onDecide={(accepted) => {
+            fetch('/api/agent/review', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ runId: pendingReview.runId, accepted })
+            }).catch(() => {});
+            setPendingReview(null);
+          }}
+        />
+      )}
       <ModelSelectorModal
         isOpen={isModelModalOpen}
         onClose={() => setIsModelModalOpen(false)}
@@ -1246,6 +1427,23 @@ ${longTermMemories.map((m) => `• [${m.category.toUpperCase()}] ${m.key}: ${m.v
         settings={settings}
         onUpdateSettings={(newSettings) => setSettings(newSettings)}
         onFactoryResetApp={handleFactoryResetApp}
+        onOpenProjectRules={() => {
+          setIsSettingsModalOpen(false);
+          setIsProjectRulesOpen(true);
+        }}
+      />
+
+      <ProjectRulesModal
+        isOpen={isProjectRulesOpen}
+        onClose={() => setIsProjectRulesOpen(false)}
+        sessionId={activeSessionId}
+      />
+
+      <OnboardingWizard
+        isOpen={isOnboardingOpen}
+        onClose={closeOnboarding}
+        onRescanModels={() => scanAndDetectLocalModels()}
+        onPickSampleTask={(prompt) => setChatDraft({ text: prompt, id: Date.now() })}
       />
     </div>
   );
