@@ -52,14 +52,14 @@ const PRESETS: Record<
   TaskMode,
   Omit<ResolvedParams, 'numCtxTokens' | 'personaAddendum'>
 > = {
-  general:        { temperature: 0.5, topP: 0.9,  repeatPenalty: 1.1, maxIterations: 6 },
-  coding:         { temperature: 0.2, topP: 0.85, repeatPenalty: 1.05, maxIterations: 20 },
-  debugging:      { temperature: 0.1, topP: 0.75, repeatPenalty: 1.0, maxIterations: 16 },
-  testing:        { temperature: 0.15, topP: 0.8, repeatPenalty: 1.0, maxIterations: 10 },
-  test_creation:  { temperature: 0.25, topP: 0.9, repeatPenalty: 1.05, maxIterations: 14 },
-  refactoring:    { temperature: 0.15, topP: 0.8, repeatPenalty: 1.0, maxIterations: 18 },
-  app_development: { temperature: 0.35, topP: 0.9, repeatPenalty: 1.1, maxIterations: 24 },
-  complex_task:   { temperature: 0.25, topP: 0.9, repeatPenalty: 1.1, maxIterations: 32 }
+  general:        { temperature: 0.5, topP: 0.9,  repeatPenalty: 1.1, maxIterations: 50 },
+  coding:         { temperature: 0.2, topP: 0.85, repeatPenalty: 1.05, maxIterations: 50 },
+  debugging:      { temperature: 0.1, topP: 0.75, repeatPenalty: 1.0, maxIterations: 50 },
+  testing:        { temperature: 0.15, topP: 0.8, repeatPenalty: 1.0, maxIterations: 50 },
+  test_creation:  { temperature: 0.25, topP: 0.9, repeatPenalty: 1.05, maxIterations: 50 },
+  refactoring:    { temperature: 0.15, topP: 0.8, repeatPenalty: 1.0, maxIterations: 50 },
+  app_development: { temperature: 0.35, topP: 0.9, repeatPenalty: 1.1, maxIterations: 50 },
+  complex_task:   { temperature: 0.25, topP: 0.9, repeatPenalty: 1.1, maxIterations: 50 }
 };
 
 /**
@@ -73,13 +73,14 @@ export function resolveTaskParams(
 ): ResolvedParams {
   const preset = PRESETS[taskMode] || PRESETS.general;
 
-  // Large models (>13B-ish tags) eat more VRAM per token — halve the context budget
-  const budget = opts.largeModel
-    ? Math.round(recommendedContextTokens / 2)
-    : recommendedContextTokens;
+  // Large models (>13B-ish tags) eat more VRAM per token, but halving was
+  // starving long agent runs. Keep the full recommended budget; the system
+  // profile already accounts for hardware.
+  const budget = recommendedContextTokens;
 
-  // Floor so tool results still fit
-  const numCtxTokens = Math.max(4096, Math.min(budget, 32768));
+  // Floor so tool results still fit; raise the ceiling for large local models
+  // (qwen3 family supports long context) instead of clamping to 32k.
+  const numCtxTokens = Math.max(8192, Math.min(budget, 65536));
 
   return { ...preset, numCtxTokens, personaAddendum: PERSONAS[taskMode] || PERSONAS.general };
 }

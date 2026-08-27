@@ -71,10 +71,9 @@ describe('conflict detection (E5)', () => {
     await executeTool(root, call('read_file', { path: 'code.ts' }));
     expect(checkConflict(path.join(root, 'code.ts')).conflicted).toBe(false);
 
-    // Simulate an external editor touching the file
+    // Simulate an external editor changing the file (content, not just mtime)
     const abs = path.join(root, 'code.ts');
-    const future = new Date(Date.now() + 5000);
-    fs.utimesSync(abs, future, future);
+    fs.writeFileSync(abs, 'const a = 1000;\n');
 
     expect(checkConflict(abs).conflicted).toBe(true);
 
@@ -93,7 +92,7 @@ describe('conflict detection (E5)', () => {
     recordMtime(abs);
     const r2 = await executeTool(root, call('apply_patch', {
       path: 'code.ts',
-      oldText: 'const a = 1;',
+      oldText: 'const a = 1000;',
       newText: 'const a = 2;'
     }));
     expect(r2.ok).toBe(true);

@@ -640,7 +640,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
               )}
             </div>
             <pre className="whitespace-pre-wrap leading-relaxed text-slate-300">
-              {commandOutput || `$ echo "OpenCode Sandbox Ready. Run 'npm start' or 'vitest run'."`}
+              {commandOutput || `$ echo "DevForge Sandbox Ready. Run 'npm start' or 'vitest run'."`}
             </pre>
           </div>
         )}
@@ -651,7 +651,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
               <div className="w-12 h-12 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto mb-3 border border-emerald-500/30">
                 <Globe className="w-6 h-6" />
               </div>
-              <h4 className="font-bold text-base text-white mb-1">Interactive OpenCode API Endpoint Preview</h4>
+              <h4 className="font-bold text-base text-white mb-1">Interactive DevForge API Endpoint Preview</h4>
               <p className="text-xs text-slate-400 mb-4">
                 Simulated response for <code>GET http://localhost:3000/api/tasks</code>
               </p>

@@ -1,0 +1,526 @@
+{
+  "generatedAt": "2026-08-24T08:54:17.527Z",
+  "modelUsed": "qwen3-coder-next:latest",
+  "scores": {
+    "categories": [
+      {
+        "key": "A",
+        "label": "Workspace Scan (15%)",
+        "pct": 1,
+        "earned": 600,
+        "possible": 600,
+        "details": [
+          "13 files indexed, gitignore respected, sample=organizer/config_manager.py",
+          "52 files indexed, gitignore respected, sample=core/ingestion/manifest.py",
+          "264 files indexed, gitignore respected, sample=src/tools/text/text-cleaner/index.tsx",
+          "5 files indexed, gitignore respected, sample=chat.py",
+          "119 files indexed, gitignore respected, sample=services/settings_service.py",
+          "17 files indexed, gitignore respected, sample=repository_intelligence/hierarchical_retriever.py"
+        ]
+      },
+      {
+        "key": "B",
+        "label": "Ranged Read (10%)",
+        "pct": 1,
+        "earned": 600,
+        "possible": 600,
+        "details": [
+          "content verified vs disk (77 lines)",
+          "content verified vs disk (98 lines)",
+          "content verified vs disk (101 lines)",
+          "content verified vs disk (83 lines)",
+          "content verified vs disk (72 lines)",
+          "content verified vs disk (174 lines)"
+        ]
+      },
+      {
+        "key": "C",
+        "label": "Search (15%)",
+        "pct": 1,
+        "earned": 600,
+        "possible": 600,
+        "details": [
+          "30+ hits via ripgrep in 15ms",
+          "30+ hits via js in 15134ms",
+          "30+ hits via ripgrep in 157ms",
+          "23+ hits via ripgrep in 131ms",
+          "30+ hits via ripgrep in 144ms",
+          "30+ hits via ripgrep in 61ms"
+        ]
+      },
+      {
+        "key": "D",
+        "label": "Outlines (10%)",
+        "pct": 1,
+        "earned": 600,
+        "possible": 600,
+        "details": [
+          "9 symbols extracted from organizer/config_manager.py",
+          "5 symbols extracted from core/ingestion/manifest.py",
+          "1 symbols extracted from src/tools/text/text-cleaner/index.tsx",
+          "2 symbols extracted from chat.py",
+          "10 symbols extracted from services/settings_service.py",
+          "4 symbols extracted from repository_intelligence/hierarchical_retriever.py"
+        ]
+      },
+      {
+        "key": "E",
+        "label": "Import Graph (10%)",
+        "pct": 0.8333333333333334,
+        "earned": 500,
+        "possible": 600,
+        "details": [
+          "0 direct deps, 0 total edges touching this file",
+          "graph failed: 0",
+          "4 direct deps, 583 total edges touching this file",
+          "0 direct deps, 0 total edges touching this file",
+          "2 direct deps, 4072 total edges touching this file",
+          "0 direct deps, 11 total edges touching this file"
+        ]
+      },
+      {
+        "key": "F",
+        "label": "Diagnostics (15%)",
+        "pct": 0.75,
+        "earned": 450,
+        "possible": 600,
+        "details": [
+          "python project — ruff path only",
+          "python project — ruff path only",
+          "tsconfig present; tsc via local node_modules",
+          "python project — ruff path only",
+          "python project — ruff path only",
+          "python project — ruff path only"
+        ]
+      },
+      {
+        "key": "G",
+        "label": "Live Agent Edit (20%)",
+        "pct": 0.8333333333333334,
+        "earned": 500,
+        "possible": 600,
+        "details": [
+          "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)",
+          "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)",
+          "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)",
+          "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)",
+          "failed to load temp copy: Error: read ECONNRESET",
+          "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)"
+        ]
+      },
+      {
+        "key": "H",
+        "label": "Infra/Security (5%)",
+        "pct": 1,
+        "earned": 300,
+        "possible": 300,
+        "details": [
+          "cuda, 32607MB VRAM, ctx budget 65536",
+          "store.json=present, runs.jsonl=present",
+          "blocked with HTTP 403"
+        ]
+      }
+    ],
+    "overall": 0.9125000000000001
+  },
+  "results": [
+    {
+      "project": "BulkFileOrganizer",
+      "fileCount": 13,
+      "checks": [
+        {
+          "name": "A. workspace-scan",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "13 files indexed, gitignore respected, sample=organizer/config_manager.py",
+          "durationMs": 3
+        },
+        {
+          "name": "B. ranged-read",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "content verified vs disk (77 lines)",
+          "durationMs": 1
+        },
+        {
+          "name": "C. search",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "30+ hits via ripgrep in 15ms",
+          "durationMs": 15
+        },
+        {
+          "name": "D. outline",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "9 symbols extracted from organizer/config_manager.py",
+          "durationMs": 1
+        },
+        {
+          "name": "E. import-graph",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "0 direct deps, 0 total edges touching this file",
+          "durationMs": 1
+        },
+        {
+          "name": "F. diagnostics",
+          "passed": true,
+          "score": 0.7,
+          "weight": 15,
+          "detail": "python project — ruff path only",
+          "durationMs": 0
+        },
+        {
+          "name": "G. live-agent-edit",
+          "passed": true,
+          "score": 1,
+          "weight": 20,
+          "detail": "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)",
+          "durationMs": 51980
+        }
+      ]
+    },
+    {
+      "project": "CodeBenchAgent",
+      "fileCount": 52,
+      "checks": [
+        {
+          "name": "A. workspace-scan",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "52 files indexed, gitignore respected, sample=core/ingestion/manifest.py",
+          "durationMs": 219
+        },
+        {
+          "name": "B. ranged-read",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "content verified vs disk (98 lines)",
+          "durationMs": 1
+        },
+        {
+          "name": "C. search",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "30+ hits via js in 15134ms",
+          "durationMs": 15135
+        },
+        {
+          "name": "D. outline",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "5 symbols extracted from core/ingestion/manifest.py",
+          "durationMs": 1
+        },
+        {
+          "name": "E. import-graph",
+          "passed": false,
+          "score": 0,
+          "weight": 10,
+          "detail": "graph failed: 0",
+          "durationMs": 120004
+        },
+        {
+          "name": "F. diagnostics",
+          "passed": true,
+          "score": 0.7,
+          "weight": 15,
+          "detail": "python project — ruff path only",
+          "durationMs": 0
+        },
+        {
+          "name": "G. live-agent-edit",
+          "passed": true,
+          "score": 1,
+          "weight": 20,
+          "detail": "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)",
+          "durationMs": 205781
+        }
+      ]
+    },
+    {
+      "project": "DevToolBox",
+      "fileCount": 264,
+      "checks": [
+        {
+          "name": "A. workspace-scan",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "264 files indexed, gitignore respected, sample=src/tools/text/text-cleaner/index.tsx",
+          "durationMs": 1712
+        },
+        {
+          "name": "B. ranged-read",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "content verified vs disk (101 lines)",
+          "durationMs": 1
+        },
+        {
+          "name": "C. search",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "30+ hits via ripgrep in 157ms",
+          "durationMs": 158
+        },
+        {
+          "name": "D. outline",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "1 symbols extracted from src/tools/text/text-cleaner/index.tsx",
+          "durationMs": 1
+        },
+        {
+          "name": "E. import-graph",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "4 direct deps, 583 total edges touching this file",
+          "durationMs": 13
+        },
+        {
+          "name": "F. diagnostics",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "tsconfig present; tsc via local node_modules",
+          "durationMs": 2
+        },
+        {
+          "name": "G. live-agent-edit",
+          "passed": true,
+          "score": 1,
+          "weight": 20,
+          "detail": "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)",
+          "durationMs": 53484
+        }
+      ]
+    },
+    {
+      "project": "DocuMindAI",
+      "fileCount": 5,
+      "checks": [
+        {
+          "name": "A. workspace-scan",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "5 files indexed, gitignore respected, sample=chat.py",
+          "durationMs": 35
+        },
+        {
+          "name": "B. ranged-read",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "content verified vs disk (83 lines)",
+          "durationMs": 0
+        },
+        {
+          "name": "C. search",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "23+ hits via ripgrep in 131ms",
+          "durationMs": 132
+        },
+        {
+          "name": "D. outline",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "2 symbols extracted from chat.py",
+          "durationMs": 0
+        },
+        {
+          "name": "E. import-graph",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "0 direct deps, 0 total edges touching this file",
+          "durationMs": 1
+        },
+        {
+          "name": "F. diagnostics",
+          "passed": true,
+          "score": 0.7,
+          "weight": 15,
+          "detail": "python project — ruff path only",
+          "durationMs": 0
+        },
+        {
+          "name": "G. live-agent-edit",
+          "passed": true,
+          "score": 1,
+          "weight": 20,
+          "detail": "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)",
+          "durationMs": 49625
+        }
+      ]
+    },
+    {
+      "project": "FlowNote",
+      "fileCount": 119,
+      "checks": [
+        {
+          "name": "A. workspace-scan",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "119 files indexed, gitignore respected, sample=services/settings_service.py",
+          "durationMs": 522
+        },
+        {
+          "name": "B. ranged-read",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "content verified vs disk (72 lines)",
+          "durationMs": 1
+        },
+        {
+          "name": "C. search",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "30+ hits via ripgrep in 144ms",
+          "durationMs": 144
+        },
+        {
+          "name": "D. outline",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "10 symbols extracted from services/settings_service.py",
+          "durationMs": 1
+        },
+        {
+          "name": "E. import-graph",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "2 direct deps, 4072 total edges touching this file",
+          "durationMs": 21581
+        },
+        {
+          "name": "F. diagnostics",
+          "passed": true,
+          "score": 0.7,
+          "weight": 15,
+          "detail": "python project — ruff path only",
+          "durationMs": 0
+        },
+        {
+          "name": "G. live-agent-edit",
+          "passed": false,
+          "score": 0,
+          "weight": 20,
+          "detail": "failed to load temp copy: Error: read ECONNRESET",
+          "durationMs": 9207
+        }
+      ]
+    },
+    {
+      "project": "Github_QnA_bot",
+      "fileCount": 17,
+      "checks": [
+        {
+          "name": "A. workspace-scan",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "17 files indexed, gitignore respected, sample=repository_intelligence/hierarchical_retriever.py",
+          "durationMs": 100
+        },
+        {
+          "name": "B. ranged-read",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "content verified vs disk (174 lines)",
+          "durationMs": 1
+        },
+        {
+          "name": "C. search",
+          "passed": true,
+          "score": 1,
+          "weight": 15,
+          "detail": "30+ hits via ripgrep in 61ms",
+          "durationMs": 61
+        },
+        {
+          "name": "D. outline",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "4 symbols extracted from repository_intelligence/hierarchical_retriever.py",
+          "durationMs": 1
+        },
+        {
+          "name": "E. import-graph",
+          "passed": true,
+          "score": 1,
+          "weight": 10,
+          "detail": "0 direct deps, 11 total edges touching this file",
+          "durationMs": 2
+        },
+        {
+          "name": "F. diagnostics",
+          "passed": true,
+          "score": 0.7,
+          "weight": 15,
+          "detail": "python project — ruff path only",
+          "durationMs": 0
+        },
+        {
+          "name": "G. live-agent-edit",
+          "passed": true,
+          "score": 1,
+          "weight": 20,
+          "detail": "edit applied, rest preserved, diff tracked, revert clean (0 tokens streamed)",
+          "durationMs": 53132
+        }
+      ]
+    }
+  ],
+  "infraChecks": [
+    {
+      "name": "H1. system-profile",
+      "passed": true,
+      "score": 1,
+      "weight": 2,
+      "detail": "cuda, 32607MB VRAM, ctx budget 65536",
+      "durationMs": 1
+    },
+    {
+      "name": "H2. persistence-store",
+      "passed": true,
+      "score": 1,
+      "weight": 2,
+      "detail": "store.json=present, runs.jsonl=present",
+      "durationMs": 0
+    },
+    {
+      "name": "H3. security-traversal-block",
+      "passed": true,
+      "score": 1,
+      "weight": 1,
+      "detail": "blocked with HTTP 403",
+      "durationMs": 1
+    }
+  ]
+}

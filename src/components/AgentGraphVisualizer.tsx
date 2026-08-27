@@ -10,18 +10,27 @@ import {
   Sparkles,
   RefreshCw,
   Terminal,
-  Activity
+  Activity,
+  Gauge
 } from 'lucide-react';
 import { LangGraphNodeState } from '../types';
+
+interface ContextUsage {
+  usedTokens: number;
+  budgetTokens: number;
+}
 
 interface AgentGraphVisualizerProps {
   nodes: LangGraphNodeState[];
   currentSessionName: string;
+  /** P1.5c: live context budget meter fed by `context_usage` stream events */
+  contextUsage?: ContextUsage | null;
 }
 
 export const AgentGraphVisualizer: React.FC<AgentGraphVisualizerProps> = ({
   nodes,
-  currentSessionName
+  currentSessionName,
+  contextUsage
 }) => {
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl text-slate-100">
@@ -45,6 +54,33 @@ export const AgentGraphVisualizer: React.FC<AgentGraphVisualizerProps> = ({
           </span>
         </div>
       </div>
+
+      {/* P1.5c: Live context budget meter */}
+      {contextUsage && contextUsage.budgetTokens > 0 && (
+        <div className="mb-4 p-3 rounded-xl bg-slate-950/80 border border-slate-800">
+          <div className="flex items-center justify-between text-xs mb-1.5">
+            <span className="font-medium flex items-center gap-1.5 text-slate-300">
+              <Gauge className="w-4 h-4 text-cyan-400" /> Context Budget
+            </span>
+            <span className="font-mono text-slate-400">
+              ~{Math.round(contextUsage.usedTokens / 1000 * 10) / 10}k / {Math.round(contextUsage.budgetTokens / 1000 * 10) / 10}k tokens
+              {' '}({Math.min(999, Math.round((contextUsage.usedTokens / contextUsage.budgetTokens) * 100))}%)
+            </span>
+          </div>
+          {(() => {
+            const pct = Math.max(0, Math.min(100, (contextUsage.usedTokens / contextUsage.budgetTokens) * 100));
+            const barColor = pct >= 75 ? 'bg-rose-500' : pct >= 50 ? 'bg-amber-400' : 'bg-emerald-500';
+            return (
+              <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
+                <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
+              </div>
+            );
+          })()}
+          <p className="text-[11px] text-slate-500 mt-1.5">
+            At ≥75% the agent summarizes older turns into a compact digest instead of dropping them.
+          </p>
+        </div>
+      )}
 
       {/* Nodes Flow Diagram */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-7 gap-3 my-4">

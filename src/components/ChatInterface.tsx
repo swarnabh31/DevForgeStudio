@@ -42,6 +42,8 @@ interface ChatInterfaceProps {
   onStopAgent?: () => void;
   onPauseAgent?: () => void;
   onResumeAgent?: () => void;
+  /** P4.1: externally injected draft text (sample tasks); new id → replaces input */
+  draftToInject?: { text: string; id: number } | null;
 }
 
 const THINKING_OPTIONS: Array<{
@@ -92,7 +94,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   agentStatus,
   onStopAgent,
   onPauseAgent,
-  onResumeAgent
+  onResumeAgent,
+  draftToInject
 }) => {
   const [inputText, setInputText] = useState('');
   const [attachments, setAttachments] = useState<AttachmentFile[]>([]);
@@ -103,6 +106,29 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // P-fix: stick-to-bottom auto-scroll — follow new content unless the user
+  // deliberately scrolled up (>120px away from the bottom).
+  const stickToBottomRef = useRef(true);
+  const lastMessage = messages[messages.length - 1];
+  const lastContentLen = typeof lastMessage?.content === 'string' ? lastMessage.content.length : 0;
+
+  React.useEffect(() => {
+    if (!stickToBottomRef.current) return;
+    chatBottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+  }, [messages.length, lastContentLen]);
+
+  const handleScroll = () => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  };
+
+  // P4.1: consume externally injected draft text (e.g. onboarding sample tasks)
+  React.useEffect(() => {
+    if (draftToInject?.text) setInputText(draftToInject.text);
+  }, [draftToInject?.id]);
 
   const currentThinkingOpt = THINKING_OPTIONS.find(o => o.id === thinkingLevel) || THINKING_OPTIONS[0];
 
@@ -162,6 +188,9 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     onSendMessage(inputText, attachments, thinkingLevel);
     setInputText('');
     setAttachments([]);
+    // Follow the user's own message immediately
+    stickToBottomRef.current = true;
+    requestAnimationFrame(() => chatBottomRef.current?.scrollIntoView({ block: 'end' }));
   };
 
   return (
@@ -303,7 +332,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       </div>
 
       {/* Messages Scroll View */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-400 my-auto">
             <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-emerald-500/20 via-teal-500/20 to-cyan-500/20 border border-emerald-500/30 flex items-center justify-center mb-4 shadow-lg shadow-emerald-500/10">
@@ -379,7 +408,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 <div className="space-y-2 flex-1 max-w-3xl">
                   {/* Sender Name & Timestamp */}
                   <div className={`flex items-center space-x-2 text-[11px] text-slate-400 ${isUser ? 'justify-end' : ''}`}>
-                    <span className="font-medium text-slate-300">{isUser ? 'You' : 'OpenCode Agent'}</span>
+                    <span className="font-medium text-slate-300">{isUser ? 'You' : 'DevForge Agent'}</span>
                     <span>•</span>
                     <span className="font-mono">{msg.timestamp}</span>
                     {onDeleteMessage && (
@@ -594,22 +623,34 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           <Paperclip className="w-4 h-4 text-cyan-400" />
         </button>
 
-        <input
-          type="text"
+        <textarea
+          ref={(el) => {
+            textareaRef.current = el;
+            // Auto-grow up to ~160px, then scroll
+            if (el) {
+              el.style.height = 'auto';
+              el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+            }
+          }}
+          rows={1}
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
           onKeyDown={(e) => {
-            // U6: Ctrl/Cmd+Enter to send, Esc to stop a running agent
-            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            // Enter sends; Shift+Enter inserts a newline. Ctrl/Cmd+Enter also
+            // sends; Esc stops a running agent.
+            if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
               handleSubmit(e as any);
             } else if (e.key === 'Escape' && isProcessing && onStopAgent) {
               onStopAgent();
+            } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              handleSubmit(e as any);
             }
           }}
-          placeholder="Ask OpenCode agent to edit code, run tests, diagnose LSP... (/test /fix /explain /new-session)"
+          placeholder="Ask DevForge agent to edit code, run tests, diagnose LSP... (/test /fix /explain /new-session) — Shift+Enter for a new line"
           disabled={isProcessing}
-          className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500/80 transition-colors"
+          className="flex-1 resize-none bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500/80 transition-colors"
         />
 
         <button

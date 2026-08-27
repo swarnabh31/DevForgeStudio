@@ -14,6 +14,26 @@ import {
 } from './fsTools';
 import { getLanguageForFile, resolveSafePath, PathTraversalError } from './lib';
 import { backupFileBeforeWrite, createBackupDir } from './backups';
+import { applyUnifiedDiff, fuzzyReplace, PatchResult } from './patchEngine';
+import {
+  applyUpdate,
+  loadLedger,
+  upsertLedgerBlock,
+  renderLedgerBlock,
+  renderLedgerHelp,
+  recordFileTouched
+} from './taskLedger';
+import { classifyToolFailure, classifyLlmError } from './errorTaxonomy';
+import {
+  runVerification,
+  renderVerificationFailure,
+  type VerifyCommand,
+  type VerifyResult
+} from './verify';
+import {
+  estimateMessagesTokens,
+  compactWithSummary
+} from './compaction';
 
 // ---------------- Types ----------------
 
@@ -40,6 +60,33 @@ export interface ExecuteToolOptions {
    * model can self-correct.
    */
   verifyEdit?: (relPath: string) => string;
+  /**
+   * P1.5e edit validation gate: called with the PROPOSED content before
+   * write_file/apply_patch reaches disk. Return a human-readable error string
+   * to reject the write (fed back as a tool error for instant self-heal), or
+   * null to allow it.
+   */
+  validateEdit?: (relPath: string, newContent: string) => Promise<string | null>;
+  /** P1.3 structured planning: receives every update_plan submission */
+  onPlanUpdate?: (steps: Array<{ text: string; status: 'pending' | 'in_progress' | 'completed' }>) => void;
+  /** P1.5a: durable task ledger run id — enables the `update_task` tool */
+  runId?: string;
+  /**
+   * P3.1 semantic code retrieval: when provided, enables the `semantic_search`
+   * tool. Receives the query, returns a rendered tool-result body.
+   */
+  semanticSearch?: (query: string, k?: number) => Promise<string>;
+  /** P3.3: enables the `delegate_research` tool (read-only explore subagent). */
+  runSubagent?: (question: string) => Promise<string>;
+  /** P5.3: user-defined plugin tools (see server/pluginTools.ts) */
+  pluginTools?: PluginRuntimeTool[];
+}
+
+/** P5.3: a runtime-registered custom tool (schema + executor). */
+export interface PluginRuntimeTool {
+  name: string;
+  schema: Record<string, unknown>;
+  execute: (args: Record<string, unknown>) => Promise<{ ok: boolean; output: string }>;
 }
 
 export type LoopEvent =
@@ -49,7 +96,26 @@ export type LoopEvent =
   | { type: 'tool_result'; result: ToolResult }
   | { type: 'permission_request'; runId: string; toolName: string; summary: string }
   | { type: 'files_changed'; files: string[] }
-  | { type: 'plan'; items: string[] };
+  | { type: 'plan'; items: string[] }
+  | { type: 'verify_start'; commands: string[] }
+  | { type: 'verify_result'; ok: boolean; results: Array<{ command: string; ok: boolean; exitCode: number; durationMs: number }> }
+  | { type: 'verify_heal'; attempt: number; maxAttempts: number }
+  | { type: 'context_usage'; usedTokens: number; budgetTokens: number }
+  | { type: 'context_compacted'; turnsDigested: number }
+  | {
+      type: 'plan_update';
+      steps: Array<{ text: string; status: 'pending' | 'in_progress' | 'completed' }>;
+    }
+  | {
+      type: 'iteration_end';
+      index: number;
+      durationMs: number;
+      /** P3.4 prompt-caching observability (Ollama stats; undefined when unknown) */
+      promptEvalMs?: number;
+      promptEvalTokens?: number;
+      evalMs?: number;
+      evalTokens?: number;
+    }
 
 export interface LoopMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -78,11 +144,64 @@ export interface AgentLoopOptions {
   sessionId?: string;
   /** E3 post-edit verification hook — returns diagnostics summary (empty = clean) */
   verifyEdit?: (relPath: string) => string;
+  validateEdit?: (relPath: string, newContent: string) => Promise<string | null>;
+  /** P1.3 structured planning: receives every update_plan submission */
+  onPlanUpdate?: (steps: Array<{ text: string; status: 'pending' | 'in_progress' | 'completed' }>) => void;
   /** Live event feed for streaming UIs */
   onEvent?: (evt: LoopEvent) => void;
   /** RE4: ask before write_file/apply_patch/run_command; false denies the tool call */
   requestPermission?: (toolName: string, args: Record<string, any>) => Promise<boolean>;
   onToolResult?: (result: ToolResult) => void;
+  /**
+   * Seed the loop with an existing message list (e.g. carried over from a prior
+   * auto-continuation pass) instead of rebuilding from `history`. When set,
+   * systemContext/history are ignored and `prompt` is appended as a new user
+   * turn — so the model resumes with full memory of previous tool activity.
+   */
+  priorMessages?: LoopMessage[];
+  /**
+   * P0.1 snapshot hook: called with the current full message list at the end
+   * of every iteration and once more after the loop exits. Use it to persist
+   * per-run messages so a crashed/cancelled run can be resumed. Errors are
+   * swallowed — a snapshot failure must never break the run.
+   */
+  onMessages?: (messages: LoopMessage[]) => void;
+  /** P1.5a: durable task ledger run id (`.devforge/tasks/<runId>.md`) */
+  runId?: string;
+  /** P3.1: enables the `semantic_search` tool (see ExecuteToolOptions) */
+  semanticSearch?: (query: string, k?: number) => Promise<string>;
+  /**
+   * P3.3: enables the `delegate_research` tool. Spawns a read-only explore
+   * subagent; its compact report is returned as this tool's result.
+   */
+  runSubagent?: (question: string) => Promise<string>;
+  /** P5.3: user-defined plugin tools (see server/pluginTools.ts) */
+  pluginTools?: PluginRuntimeTool[];
+  /**
+   * P1.2 auto-verify: after each iteration that changed files, run these
+   * verification commands; on failure inject the error output back into the
+   * loop (up to `maxHealAttempts` times) so the model self-heals.
+   */
+  autoVerify?: { commands: VerifyCommand[]; maxHealAttempts?: number };
+  /**
+   * P1.5b self-summarizing compaction: how many recent turns stay verbatim
+   * when the context budget nears overflow and older turns get digested.
+   * Requires sampling.numCtxTokens to be set (the budget it protects).
+   */
+  compactionKeepTurns?: number;
+  /**
+   * P2.2 diff-review gate: called BEFORE write_file/apply_patch executes.
+   * Return a (possibly argument-transformed) ToolCall to proceed — e.g. with
+   * only the user-accepted hunks — or null to deny. Runs ahead of, and
+   * independently from, requestPermission.
+   */
+  reviewEdit?: (call: ToolCall) => Promise<ToolCall | null>;
+  /**
+   * P1.5d git-first workflow: called after an edit batch is VERIFIED (or, when
+   * no autoVerify is configured, right after the edit batch) with the files
+   * changed since the previous commit. Best-effort — never blocks the loop.
+   */
+  onStepVerified?: (files: string[], summary: string) => void;
 }
 
 export interface AgentLoopResult {
@@ -93,6 +212,12 @@ export interface AgentLoopResult {
   usedTools: boolean;
   /** True when the loop exhausted maxIterations without the model producing a final answer */
   hitIterationCap?: boolean;
+  /**
+   * Final message list (including all tool calls/results). Callers running
+   * continuation passes should feed this back via `priorMessages` so the next
+   * pass resumes from where this one stopped instead of starting over.
+   */
+  messages?: LoopMessage[];
 }
 
 // ---------------- Tool schema ----------------
@@ -178,15 +303,16 @@ const TOOL_SCHEMAS = [
     function: {
       name: 'apply_patch',
       description:
-        'Edit an existing file by replacing an exact snippet. oldText must match the current file exactly and be unique. Include enough surrounding lines to be unambiguous.',
+        'Edit an existing file. PREFERRED: "patch" — a unified diff (one or more @@ hunks with context lines); matching is fuzzy and tolerant of whitespace/indentation drift. ALTERNATIVE: "oldText"/"newText" — replace a unique snippet (exact or near-exact match). Failures include similarity % and the closest line — re-read the file and retry with corrected context.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string' },
+          patch: { type: 'string', description: 'Unified diff (unidiff) with @@ -oldStart,count +newStart,count @@ hunks. Lines prefixed with - (removed), + (added), or one leading space (context).' },
           oldText: { type: 'string' },
           newText: { type: 'string' }
         },
-        required: ['path', 'oldText', 'newText']
+        required: ['path']
       }
     }
   },
@@ -210,8 +336,113 @@ const TOOL_SCHEMAS = [
       description: 'Get the git diff of the workspace repository (read-only).',
       parameters: { type: 'object', properties: {} }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_plan',
+      description:
+        'REQUIRED planning tool. Before doing multi-step work, submit your FULL ordered step list here, then call it again whenever a step changes status (mark completed ONLY after the step is verified working). The UI shows this plan live to the user.',
+      parameters: {
+        type: 'object',
+        properties: {
+          steps: {
+            type: 'array',
+            description: 'FULL ordered step list (replaces the previous plan).',
+            items: {
+              type: 'object',
+              properties: {
+                text: { type: 'string', description: 'Imperative step description, e.g. "Add CSV parser to utils.ts"' },
+                status: {
+                  type: 'string',
+                  enum: ['pending', 'in_progress', 'completed'],
+                  description: 'Default pending.'
+                }
+              },
+              required: ['text']
+            }
+          },
+          note: { type: 'string', description: 'Optional one-line progress note' }
+        },
+        required: ['steps']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_task',
+      description:
+        'Update the durable task ledger — an on-disk progress record that survives crashes and context loss. Send the FULL steps list (it replaces the previous one), plus any new finding, file you are working on, and the single next action.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Short task title' },
+          steps: {
+            type: 'array',
+            description: 'FULL ordered step list (replaces previous). Each: { text, status, note? }',
+            items: {
+              type: 'object',
+              properties: {
+                text: { type: 'string' },
+                status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked'] },
+                note: { type: 'string', description: 'Optional detail, e.g. why a step is blocked' }
+              },
+              required: ['text']
+            }
+          },
+          add_finding: { type: 'string', description: 'A key finding or decision worth remembering' },
+          file: { type: 'string', description: 'Workspace-relative file you are creating or editing' },
+          next_action: { type: 'string', description: 'The single next thing to do' }
+        }
+      }
+    }
   }
 ];
+
+/** P3.1: semantic_search is only exposed when a retrieval backend is wired. */
+const SEMANTIC_SEARCH_SCHEMA: any = {
+  type: 'function',
+  function: {
+    name: 'semantic_search',
+    description:
+      'Semantic code search across the workspace (local embeddings + keyword blend). Finds relevant functions/classes by MEANING, not just exact text. Returns file paths with line ranges — follow up with read_file on those ranges.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'What to look for, e.g. "where CSV files are parsed"' },
+        k: { type: 'number', description: 'Max results (default 6, max 12)' }
+      },
+      required: ['query']
+    }
+  }
+};
+
+/** P3.3: delegate_research is only exposed when a subagent backend is wired. */
+const DELEGATE_RESEARCH_SCHEMA: any = {
+  type: 'function',
+  function: {
+    name: 'delegate_research',
+    description:
+      'Delegate a research question to a read-only explore subagent (it has its own tool budget and cannot edit anything). Use it for broad investigation ("where/how is X implemented?") so you save your OWN iterations for editing. Returns a compact report with file paths + line ranges.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'Precise research question, e.g. "where are CSV files parsed and which function normalizes columns?"' }
+      },
+      required: ['question']
+    }
+  }
+};
+
+function toolSchemas(opts: { semanticSearch?: unknown; runSubagent?: unknown; pluginTools?: PluginRuntimeTool[] }) {
+  const extra = [
+    ...(opts.semanticSearch ? [SEMANTIC_SEARCH_SCHEMA] : []),
+    ...(opts.runSubagent ? [DELEGATE_RESEARCH_SCHEMA] : []),
+    ...(opts.pluginTools || []).map((t) => t.schema)
+  ];
+  return extra.length ? [...TOOL_SCHEMAS, ...extra] : TOOL_SCHEMAS;
+}
 
 export const ALLOWED_COMMAND_PREFIXES = [
   'npm test',
@@ -260,6 +491,25 @@ export async function executeTool(
   options: ExecuteToolOptions = {}
 ): Promise<ToolResult> {
   const signal = options.signal;
+
+  // P5.3: plugin tools take precedence by name over the built-in switch
+  if (options.pluginTools?.length) {
+    const plugin = options.pluginTools.find((t) => t.name === call.name);
+    if (plugin) {
+      try {
+        const r = await plugin.execute(call.arguments || {});
+        return { callId: call.id, name: call.name, ok: r.ok, content: r.output };
+      } catch (err: any) {
+        return {
+          callId: call.id,
+          name: call.name,
+          ok: false,
+          content: `ERROR: plugin tool "${call.name}" failed — ${String(err?.message || err)}`
+        };
+      }
+    }
+  }
+
   try {
     switch (call.name) {
       case 'list_files': {
@@ -338,6 +588,36 @@ export async function executeTool(
         return { callId: call.id, name: call.name, ok: true, content: body };
       }
 
+      // P3.1: semantic code retrieval (only wired when options.semanticSearch set)
+      case 'semantic_search': {
+        if (!options.semanticSearch) {
+          return { callId: call.id, name: call.name, ok: false, content: 'ERROR: semantic search unavailable in this run' };
+        }
+        const body = await options.semanticSearch(
+          String(call.arguments.query),
+          Math.min(Number(call.arguments.k) || 6, 12)
+        );
+        return { callId: call.id, name: call.name, ok: true, content: body };
+      }
+
+      // P3.3: read-only explore subagent (only wired when options.runSubagent set)
+      case 'delegate_research': {
+        if (!options.runSubagent) {
+          return { callId: call.id, name: call.name, ok: false, content: 'ERROR: research delegation unavailable in this run' };
+        }
+        try {
+          const report = await options.runSubagent(String(call.arguments.question || ''));
+          return { callId: call.id, name: call.name, ok: true, content: report };
+        } catch (err: any) {
+          return {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: `ERROR: subagent failed — ${String(err?.message || err)}; investigate yourself with search/read_file.`
+          };
+        }
+      }
+
       case 'write_file': {
         const userPath = String(call.arguments.path);
         const content = String(call.arguments.content ?? '');
@@ -346,6 +626,17 @@ export async function executeTool(
         // Binary-extension safety
         if (!TEXT_EXTENSIONS.has(path.extname(abs).toLowerCase())) {
           return { callId: call.id, name: call.name, ok: false, content: `ERROR: refusing to write non-text extension ${path.extname(abs)}` };
+        }
+
+        // P1.5e edit validation gate — reject invalid content BEFORE disk
+        const gateErr = options.validateEdit ? await options.validateEdit(userPath, content) : null;
+        if (gateErr) {
+          return {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: `EDIT REJECTED BY VALIDATION GATE (file was NOT written):\n${gateErr}\nFix the issues and re-apply the write.`
+          };
         }
 
         // E5: refuse to clobber external modifications
@@ -389,11 +680,22 @@ export async function executeTool(
 
       case 'apply_patch': {
         const userPath = String(call.arguments.path);
+        const patchArg = String(call.arguments.patch ?? '');
         const oldText = String(call.arguments.oldText ?? '');
         const newText = String(call.arguments.newText ?? '');
         const abs = resolveSafePath(root, userPath);
 
-        if (!oldText) {
+        const hasDiff = patchArg.trim().length > 0;
+        const hasSnippet = oldText.length > 0 || newText.length > 0;
+        if (!hasDiff && !hasSnippet) {
+          return {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: 'ERROR: provide "patch" (unified diff) or "oldText"/"newText" to apply.'
+          };
+        }
+        if (!hasDiff && oldText.length === 0) {
           return { callId: call.id, name: call.name, ok: false, content: 'ERROR: oldText is empty' };
         }
 
@@ -414,25 +716,35 @@ export async function executeTool(
         }
         const current = buf.toString('utf-8');
 
-        const count = current.split(oldText).length - 1;
-        if (count === 0) {
-          return { callId: call.id, name: call.name, ok: false, content: 'ERROR: oldText not found in file. Read the file again and copy the exact text including whitespace.' };
+        const res: PatchResult = hasDiff
+          ? applyUnifiedDiff(current, patchArg)
+          : fuzzyReplace(current, oldText, newText);
+
+        if (!res.ok) {
+          return { callId: call.id, name: call.name, ok: false, content: `ERROR: ${res.error}` };
         }
-        if (count > 1) {
-          return { callId: call.id, name: call.name, ok: false, content: `ERROR: oldText matches ${count} locations. Include more surrounding lines to make it unique.` };
+
+        // P1.5e edit validation gate on the PATCHED result — before disk
+        const patchGateErr = options.validateEdit ? await options.validateEdit(userPath, res.content!) : null;
+        if (patchGateErr) {
+          return {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: `EDIT REJECTED BY VALIDATION GATE (file was NOT modified):\n${patchGateErr}\nFix the issues and re-apply the patch.`
+          };
         }
 
         // W2: snapshot before patching
         if (options.backupDir) backupFileBeforeWrite(root, abs, options.backupDir);
 
-        const updated = current.replace(oldText, () => newText);
         const tmp = abs + '.ocastmp';
-        fs.writeFileSync(tmp, updated, 'utf-8');
+        fs.writeFileSync(tmp, res.content!, 'utf-8');
         fs.renameSync(tmp, abs);
         recordMtime(abs);
 
-        const added = newText ? newText.split('\n').length : 0;
-        const removed = oldText.split('\n').length;
+        const added = res.added ?? 0;
+        const removed = res.removed ?? 0;
         const verifyNote = options.verifyEdit ? options.verifyEdit(userPath) : '';
         return {
           callId: call.id,
@@ -492,6 +804,67 @@ export async function executeTool(
         });
       }
 
+      case 'update_plan': {
+        // P1.3 structured planning discipline: plan → execute → verify with
+        // explicit statuses, surfaced live via plan_update events (no regex scraping).
+        const rawSteps = Array.isArray(call.arguments?.steps) ? call.arguments.steps : [];
+        const steps = rawSteps
+          .slice(0, 20)
+          .map((s: any) => ({
+            text: String(s?.text || '').slice(0, 160),
+            status: (['pending', 'in_progress', 'completed'].includes(s?.status) ? s.status : 'pending') as
+              | 'pending'
+              | 'in_progress'
+              | 'completed'
+          }))
+          .filter((s: any) => s.text);
+        if (!steps.length) {
+          return {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: 'ERROR: update_plan requires a non-empty steps array [{text, status}].'
+          };
+        }
+        try {
+          options.onPlanUpdate?.(steps);
+        } catch {}
+        const done = steps.filter((s: any) => s.status === 'completed').length;
+        const note = call.arguments?.note ? ` — ${String(call.arguments.note).slice(0, 120)}` : '';
+        return {
+          callId: call.id,
+          name: call.name,
+          ok: true,
+          content: `plan updated (${done}/${steps.length} completed)${note}. Keep statuses current as you work.`
+        };
+      }
+
+      case 'update_task': {
+        const runId = options.runId;
+        if (!runId) {
+          return {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: 'ERROR: no run id bound to this session — the durable task ledger is unavailable'
+          };
+        }
+        const ledger = applyUpdate(root, runId, call.arguments);
+        let stepSummary = 'no steps';
+        if (ledger.steps.length) {
+          const done = ledger.steps.filter((s) => s.status === 'completed').length;
+          stepSummary = `${done}/${ledger.steps.length} steps done`;
+        }
+        return {
+          callId: call.id,
+          name: call.name,
+          ok: true,
+          content:
+            `ledger updated: ${stepSummary}; next: ${ledger.nextAction || '(none)'}; ` +
+            `files tracked: ${ledger.filesTouched.length}`
+        };
+      }
+
       default:
         return { callId: call.id, name: call.name, ok: false, content: `ERROR: unknown tool "${call.name}"` };
     }
@@ -537,7 +910,16 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 
 /** Strip qwen3-style <think> reasoning blocks from model output. */
 function stripThinkBlocks(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<think>[\s\S]*$/g, '');
+  let out = text.replace(/<think>[\s\S]*?\/think\u003E/g, '')
+  const lastOpen = out.lastIndexOf('<think>')
+  if (lastOpen !== -1) {
+    // Unterminated open tag: keep text AFTER the tag (likely the actual
+    // answer); drop only the tag and the raw reasoning preceding it.
+    const head = lastOpen > 0 ? out.slice(0, lastOpen).trimEnd() : ''
+    const tail = out.slice(lastOpen + '<think>'.length).trim()
+    out = [head, tail].filter(Boolean).join('\n')
+  }
+  return out;
 }
 
 /** One LLM call that may return tool_calls (OpenAI-style normalized). */
@@ -550,7 +932,7 @@ async function callLLMWithTools(
   sampling?: { temperature: number; topP: number; repeatPenalty: number; numCtxTokens: number },
   onToken?: (delta: string) => void,
   thinkingLevel?: 'none' | 'low' | 'medium' | 'high'
-): Promise<{ content: string; toolCalls: ToolCall[] } | null> {
+): Promise<{ content: string; toolCalls: ToolCall[]; stats?: LlmCallStats } | null> {
   const cleanEp = endpoint.replace(/\/$/, '');
   const payloadTools = tools.length ? tools : undefined;
   const wantsStream = !!onToken;
@@ -598,12 +980,12 @@ async function callLLMWithTools(
           }),
           signal
         },
-        180000
+        600000
       );
       if (resp.ok && resp.body && wantsStream) {
         const parsed = await consumeOllamaStream(resp.body, onToken!, signal);
         const cleaned = stripThinkBlocks(parsed.content);
-        if (cleaned.trim() || parsed.toolCalls.length) return { content: cleaned, toolCalls: parsed.toolCalls };
+        if (cleaned.trim() || parsed.toolCalls.length) return { content: cleaned, toolCalls: parsed.toolCalls, stats: parsed.stats };
         continue; // empty — try next strategy/attempt
       }
       if (resp.ok) {
@@ -618,7 +1000,7 @@ async function callLLMWithTools(
               : tc.function?.arguments || {}
           }));
           if (calls.length || (msg.content && msg.content.trim())) {
-            return { content: msg.content || '', toolCalls: calls };
+            return { content: msg.content || '', toolCalls: calls, stats: statsFromOllamaDone(data) };
           }
         }
       }
@@ -643,7 +1025,7 @@ async function callLLMWithTools(
           }),
           signal
         },
-        180000
+        600000
       );
       if (resp.ok) {
         const data: any = await resp.json();
@@ -655,7 +1037,15 @@ async function callLLMWithTools(
             arguments: safeJsonParse(tc.function?.arguments || '{}')
           }));
           if (calls.length || (typeof msg.content === 'string' && msg.content.trim())) {
-            return { content: stripThinkBlocks(msg.content || ''), toolCalls: calls };
+            const u = data?.usage;
+            return {
+              content: stripThinkBlocks(msg.content || ''),
+              toolCalls: calls,
+              stats:
+                u && typeof u.prompt_tokens === 'number'
+                  ? { promptEvalTokens: u.prompt_tokens, evalTokens: u.completion_tokens }
+                  : undefined
+            };
           }
         }
       }
@@ -670,12 +1060,30 @@ async function callLLMWithTools(
   return null;
 }
 
+/** P3.4: per-call inference stats from Ollama's final stream frame / response. */
+interface LlmCallStats {
+  promptEvalTokens?: number;
+  promptEvalMs?: number;
+  evalTokens?: number;
+  evalMs?: number;
+}
+
+function statsFromOllamaDone(d: any): LlmCallStats | undefined {
+  if (!d || typeof d !== 'object') return undefined;
+  const s: LlmCallStats = {};
+  if (typeof d.prompt_eval_count === 'number') s.promptEvalTokens = d.prompt_eval_count;
+  if (typeof d.prompt_eval_duration === 'number') s.promptEvalMs = Math.round(d.prompt_eval_duration / 1e6);
+  if (typeof d.eval_count === 'number') s.evalTokens = d.eval_count;
+  if (typeof d.eval_duration === 'number') s.evalMs = Math.round(d.eval_duration / 1e6);
+  return Object.keys(s).length ? s : undefined;
+}
+
 /** Consume Ollama's NDJSON chat stream, emitting token deltas as they arrive. */
 async function consumeOllamaStream(
   body: ReadableStream<Uint8Array>,
   onToken: (delta: string) => void,
   signal?: AbortSignal
-): Promise<{ content: string; toolCalls: ToolCall[] }> {
+): Promise<{ content: string; toolCalls: ToolCall[]; stats?: LlmCallStats }> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -710,7 +1118,7 @@ async function consumeOllamaStream(
                 : tc.function?.arguments || {}
           }));
         }
-        if (evt?.done) return { content, toolCalls };
+        if (evt?.done) return { content, toolCalls, stats: statsFromOllamaDone(evt) };
       } catch {
         /* partial line — ignore */
       }
@@ -729,15 +1137,57 @@ function safeJsonParse(s: string): Record<string, any> {
 
 // ---------------- The loop ----------------
 
+/**
+ * P1.5a: re-inject the durable task ledger into the first system message every
+ * iteration. If the ledger exists on disk it is rendered in full (so a resumed
+ * run starts with progress, not amnesia); otherwise the model gets the usage
+ * help for the `update_task` tool. Best-effort — a ledger failure must never
+ * break the run.
+ */
+function refreshLedgerInPrompt(messages: LoopMessage[], root: string, runId: string | undefined): void {
+  if (!runId) return;
+  try {
+    const block = renderLedgerBlock(loadLedger(root, runId));
+    const sysIdx = messages.findIndex((m) => m.role === 'system');
+    if (sysIdx === -1) {
+      // No system message yet (priorMessages path): create one.
+      messages.unshift({ role: 'system', content: renderLedgerHelp() + block });
+      return;
+    }
+    // P3.4 prefix stability: only mutate the system message when the rendered
+    // block ACTUALLY changed — rewriting identical content byte-for-byte would
+    // still be a no-op for the model, but keeping the string reference stable
+    // makes prompt-cache friendliness explicit.
+    const next = upsertLedgerBlock(messages[sysIdx].content, block);
+    if (next !== messages[sysIdx].content) messages[sysIdx].content = next;
+  } catch {
+    /* ledger refresh is best-effort */
+  }
+}
+
 export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopResult> {
   const maxIterations = opts.maxIterations ?? 8;
-  const messages: LoopMessage[] = [{ role: 'system', content: opts.systemContext }];
-
-  // RE7: trim history to last 10 turns
-  for (const m of opts.history.slice(-10)) {
-    messages.push({ role: m.role, content: m.content });
+  const messages: LoopMessage[] = opts.priorMessages
+    ? [...opts.priorMessages]
+    : [{ role: 'system', content: opts.systemContext }];
+  if (!opts.priorMessages) {
+    // RE7: trim history to last 20 turns
+    for (const m of opts.history.slice(-20)) {
+      messages.push({ role: m.role, content: m.content });
+    }
   }
+
   messages.push({ role: 'user', content: opts.prompt });
+
+  // P0.1: snapshot helper — failures must never break the run.
+  const snapshot = (): void => {
+    try {
+      opts.onMessages?.([...messages]);
+    } catch {
+      /* snapshot is best-effort */
+    }
+  };
+  if (opts.onMessages) snapshot();
 
   const toolResults: ToolResult[] = [];
   const filesChanged = new Set<string>();
@@ -751,6 +1201,19 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   const toolOpts: ExecuteToolOptions = {
     signal: opts.signal,
     verifyEdit: opts.verifyEdit,
+    validateEdit: opts.validateEdit,
+    onPlanUpdate: (steps) => {
+      try {
+        opts.onPlanUpdate?.(steps);
+      } catch {}
+      try {
+        opts.onEvent?.({ type: 'plan_update', steps });
+      } catch {}
+    },
+    runId: opts.runId,
+    semanticSearch: opts.semanticSearch,
+    runSubagent: opts.runSubagent,
+    pluginTools: opts.pluginTools,
     get backupDir() {
       if (!lazyBackupDir) {
         lazyBackupDir = createBackupDir(opts.root, opts.sessionId || 'run');
@@ -761,25 +1224,81 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
   let answeredWithoutTools = false;
   let planEmitted = false;
+  let lastToolCallCount = 0;
+  // P1.2 auto-verify state
+  let editsSinceVerify = false;
+  let healAttemptsUsed = 0;
+  // P1.5d files already handed to the git committer
+  let committedFiles = new Set<string>();
+  // Only true when the for-loop genuinely exhausts maxIterations. Errors,
+  // aborts, and the failed-call guard must NOT count as "budget reached",
+  // otherwise the caller fires pointless auto-continue passes.
+  let capGenuinelyReached = false;
+  let stoppedBeforeCap = false;
 
   for (let iter = 0; iter < maxIterations; iter++) {
     if (opts.signal?.aborted) throw new Error('cancelled');
+    const iterStart = Date.now();
     opts.onEvent?.({ type: 'iteration', index: iter });
 
-    // Context compaction: shrink tool results from earlier iterations so long
-    // runs don't drown the model's context window. The most recent iteration's
-    // results stay full; older ones keep only their head.
-    if (iter > 0) {
-      for (const m of messages) {
-        if (m.role === 'tool' && m.content.length > 1200) {
+    // P1.5a: keep the durable task ledger fresh in the system prompt every
+    // iteration so the model always knows current progress and next action.
+    refreshLedgerInPrompt(messages, opts.root, opts.runId);
+
+    // Context management (iter > 0): prefer P1.5b self-summarizing compaction
+    // when the conversation nears the context budget; the LLM digests the
+    // oldest turns into a dense summary instead of us dropping them blind.
+    // If summarization is unavailable/fails, fall back to head truncation.
+    let summarizedThisIter = false;
+    let turnsDigested = 0;
+    const ctxBudget = opts.sampling?.numCtxTokens;
+    if (iter > 0 && ctxBudget && opts.endpoints.length > 0) {
+      const usedTokens = estimateMessagesTokens(messages);
+      opts.onEvent?.({ type: 'context_usage', usedTokens, budgetTokens: ctxBudget });
+      if (usedTokens > ctxBudget * 0.75) {
+        try {
+          turnsDigested = await compactWithSummary(messages, {
+            endpoint: opts.endpoints[0],
+            modelId: opts.modelId,
+            signal: opts.signal,
+            keepRecentTurns: opts.compactionKeepTurns ?? 4
+          });
+        } catch {
+          turnsDigested = 0;
+        }
+        summarizedThisIter = turnsDigested > 0;
+        if (summarizedThisIter) {
+          opts.onEvent?.({ type: 'context_compacted', turnsDigested });
+        }
+      }
+    }
+
+    // Truncation-based compaction (fallback / below-budget upkeep): shrink tool
+    // results from earlier iterations so long runs don't drown the model's
+    // context window. The most recent iteration's results stay full; older ones keep only their head.
+    if (iter > 0 && !summarizedThisIter) {
+      const toolMsgs = messages.filter((m) => m.role === 'tool');
+      const keepFull = Math.max(0, toolMsgs.length - lastToolCallCount);
+      for (const m of toolMsgs.slice(0, keepFull)) {
+        if (m.content.length > 1200) {
           m.content =
             m.content.slice(0, 500) +
             '\n…[older tool result truncated to save context — re-read with offset/limit if you need it again]';
         }
       }
+      // Compact old assistant narration too: on long runs the model's own prose
+      // accumulates and prompt-eval time grows every iteration (painful on local
+      // LLMs). Keep only the head of assistant turns older than the last round.
+      const asstMsgs = messages.filter((m) => m.role === 'assistant');
+      const keepAsst = Math.max(0, asstMsgs.length - 2);
+      for (const m of asstMsgs.slice(0, keepAsst)) {
+        if (m.content.length > 600) {
+          m.content = m.content.slice(0, 300) + '\n…[earlier narration truncated to save context]';
+        }
+      }
     }
 
-    let llm: { content: string; toolCalls: ToolCall[] } | null = null;
+    let llm: { content: string; toolCalls: ToolCall[]; stats?: LlmCallStats } | null = null;
     let lastError: Error | null = null;
 
     for (const ep of opts.endpoints) {
@@ -788,7 +1307,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           ep,
           opts.modelId,
           messages,
-          TOOL_SCHEMAS,
+          toolSchemas(opts),
           opts.signal,
           opts.sampling,
           opts.onEvent ? (delta) => opts.onEvent!({ type: 'token', delta }) : undefined,
@@ -803,9 +1322,18 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     }
 
     if (!llm) {
+      const cls = classifyLlmError(lastError);
       if (iter === 0) {
         throw new Error(humanizeLlmError(lastError) || 'no local LLM reachable at any endpoint');
       }
+      // Visible, CATEGORIZED failure instead of a silent empty reply mid-run
+      stoppedBeforeCap = true;
+      opts.onEvent?.({
+        type: 'token',
+        delta:
+          `\n\n[error:${cls.category}] Model stopped responding after iteration ${iter}${lastError ? ` (${lastError.message})` : ''}. Showing partial result so far.` +
+          (cls.guidance ? `\nRecovery hint: ${cls.guidance}` : '')
+      });
       break;
     }
 
@@ -824,11 +1352,47 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       }
     }
 
+    // Some models (qwen3) refuse native tool calls and instead emit the actions
+    // as a fenced ```json block. Recover them so they go through the SAME
+    // permission-gated execution path below (never bypass the gate).
+    if (!llm.toolCalls.length && llm.content) {
+      const batch = parseJsonActionBlock(llm.content);
+      if (batch) {
+        // Drop the raw fence from the reply so the user sees prose, not JSON
+        const stripped = llm.content.replace(/```json[\s\S]*?```/g, '').trim();
+        if (stripped) llm.content = stripped;
+        const ts = Date.now();
+        let n = 0;
+        for (const p of batch.patches || []) {
+          llm.toolCalls.push({
+            id: `jsonbatch-${ts}-${n++}`,
+            name: 'apply_patch',
+            arguments: { path: p.filePath, oldText: p.oldText, newText: p.newText, ...(p.patch ? { patch: p.patch } : {}) }
+          });
+        }
+        for (const f of batch.modifiedFiles || []) {
+          llm.toolCalls.push({
+            id: `jsonbatch-${ts}-${n++}`,
+            name: 'write_file',
+            arguments: { path: f.filePath, content: f.content }
+          });
+        }
+      }
+    }
+
     if (!llm.toolCalls.length) {
       answeredWithoutTools = true;
+      // P3.4/P2.3: the final iteration still reports its timing + inference stats
+      opts.onEvent?.({
+        type: 'iteration_end',
+        index: iter,
+        durationMs: Date.now() - iterStart,
+        ...(llm.stats || {})
+      });
       break; // final textual answer
     }
 
+    lastToolCallCount = llm.toolCalls.length;
     usedTools = true;
     messages.push({
       role: 'assistant',
@@ -844,9 +1408,48 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         : {})
     });
 
-    for (const call of llm.toolCalls) {
+    for (let callIndex = 0; callIndex < llm.toolCalls.length; callIndex++) {
+      let call = llm.toolCalls[callIndex];
       if (opts.signal?.aborted) throw new Error('cancelled');
       opts.onEvent?.({ type: 'tool_call', name: call.name, arguments: call.arguments });
+
+      // P2.2 diff-review gate: user accepts/rejects hunks BEFORE execution;
+      // the returned call may carry rewritten arguments (accepted hunks only).
+      if (
+        (call.name === 'write_file' || call.name === 'apply_patch') &&
+        opts.reviewEdit
+      ) {
+        let reviewed: ToolCall | null = null;
+        try {
+          reviewed = await opts.reviewEdit(call);
+        } catch (err: any) {
+          const fail: ToolResult = {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: `ERROR: review gate failed — ${err?.message || err}`
+          };
+          toolResults.push(fail);
+          opts.onEvent?.({ type: 'tool_result', result: fail });
+          opts.onToolResult?.(fail);
+          messages.push({ role: 'tool', content: fail.content, tool_call_id: call.id });
+          continue;
+        }
+        if (!reviewed) {
+          const denied: ToolResult = {
+            callId: call.id,
+            name: call.name,
+            ok: false,
+            content: 'DENIED in diff review. Do not retry this exact edit; adjust it or proceed without it.'
+          };
+          toolResults.push(denied);
+          opts.onEvent?.({ type: 'tool_result', result: denied });
+          opts.onToolResult?.(denied);
+          messages.push({ role: 'tool', content: denied.content, tool_call_id: denied.callId });
+          continue;
+        }
+        call = reviewed;
+      }
 
       // RE4: permission gate on side-effecting tools
       if (
@@ -876,6 +1479,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       opts.onEvent?.({ type: 'tool_result', result });
       opts.onToolResult?.(result);
 
+      // P1.4 error taxonomy: failed calls get a CATEGORY + tailored recovery
+      // hint appended to the message the model sees next iteration.
+      let failureGuidance = '';
+      if (!result.ok) {
+        const cls = classifyToolFailure(result.content);
+        if (cls.category !== 'cancelled' && cls.guidance) {
+          failureGuidance = `\n\n[${cls.category}] Recovery: ${cls.guidance}`;
+        }
+      }
+
       // Phase 7 no-op guard: stop when the model repeats identical failing calls
       const fingerprint = `${call.name}:${JSON.stringify(call.arguments)}:${result.ok}`;
       if (!result.ok) {
@@ -885,13 +1498,19 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           lastFailedFingerprint = fingerprint;
           failedRepeatCount = 1;
         }
-        if (failedRepeatCount >= 3) {
+        if (failedRepeatCount >= 5) {
+          // Visible signal in the stream so users know why the run stopped early
+          opts.onEvent?.({
+            type: 'token',
+            delta: `\n\n[agent stopped: "${call.name}" has now failed ${failedRepeatCount} times with identical arguments — escalating for a final summary]`
+          });
           messages.push({
             role: 'tool',
-            content: 'Stopping: the same action has failed repeatedly. Summarize progress and what remains.',
+            content: `The same action has failed ${failedRepeatCount} times with identical arguments. STOP retrying it. Summarize progress, and state what remains and why it is failing.`,
             tool_call_id: call.id
           });
-          break;
+          stoppedBeforeCap = true;
+          break; // exits per-call loop; next iteration asks the model to summarize
         }
       } else {
         lastFailedFingerprint = '';
@@ -900,16 +1519,118 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
       if ((call.name === 'write_file' || call.name === 'apply_patch') && result.ok) {
         filesChanged.add(String(call.arguments.path));
+        editsSinceVerify = true;
         opts.onEvent?.({ type: 'files_changed', files: [...filesChanged] });
+        // P1.5a: auto-track the file in the durable ledger (best-effort).
+        if (opts.runId) {
+          try {
+            recordFileTouched(opts.root, opts.runId, String(call.arguments.path));
+          } catch {
+            /* ledger is best-effort */
+          }
+        }
       }
 
       messages.push({
         role: 'tool',
-        content: result.content.slice(0, 12000),
+        content:
+          result.content.slice(0, 12000) +
+          (failureGuidance ? `\n${failureGuidance}` : ''),
         tool_call_id: result.callId
       });
     }
+
+    // P1.2 auto-verify: after an iteration that edited files, run the
+    // project's verify commands; failures are fed back into the loop so the
+    // model self-heals immediately instead of failing end-of-run.
+    const editedThisIter = editsSinceVerify;
+    let stepVerifiedOk = !opts.autoVerify || opts.autoVerify.commands.length === 0;
+    if (editedThisIter && opts.autoVerify && opts.autoVerify.commands.length > 0) {
+      editsSinceVerify = false;
+      const maxHeals = opts.autoVerify.maxHealAttempts ?? 3;
+      const commands = opts.autoVerify.commands;
+      const cmdNames = commands.map((c) => c.command);
+      opts.onEvent?.({ type: 'verify_start', commands: cmdNames });
+      let results: VerifyResult[] = [];
+      try {
+        results = await runVerification(opts.root, commands);
+      } catch (err: any) {
+        results = [
+          {
+            command: { name: 'verify', command: cmdNames[0] || 'verify' },
+            ok: false,
+            exitCode: -1,
+            durationMs: 0,
+            output: `verification runner error: ${err?.message || err}`
+          }
+        ];
+      }
+      const allOk = results.length > 0 && results.every((r) => r.ok);
+      stepVerifiedOk = allOk;
+      opts.onEvent?.({
+        type: 'verify_result',
+        ok: allOk,
+        results: results.map((r) => ({
+          command: r.command.command,
+          ok: r.ok,
+          exitCode: r.exitCode,
+          durationMs: r.durationMs
+        }))
+      });
+
+      if (!allOk) {
+        if (healAttemptsUsed < maxHeals) {
+          healAttemptsUsed++;
+          opts.onEvent?.({ type: 'verify_heal', attempt: healAttemptsUsed, maxAttempts: maxHeals });
+          messages.push({ role: 'user', content: renderVerificationFailure(results) });
+          snapshot();
+          continue; // next iteration: model sees the failures and heals
+        }
+        // Heal budget exhausted — stop with a visible reason.
+        stoppedBeforeCap = true;
+        opts.onEvent?.({
+          type: 'token',
+          delta: `\n\n[auto-verify still failing after ${maxHeals} heal attempts — stopping for review]`
+        });
+        messages.push({
+          role: 'user',
+          content:
+            renderVerificationFailure(results) +
+            `\n\nThe automatic heal budget (${maxHeals} attempts) is exhausted. Summarize what is broken and what remains.`
+        });
+        break;
+      }
+    }
+
+    // P1.5d git-first workflow: auto-commit each VERIFIED step (or, without
+    // verification configured, each edit batch). Best-effort, never blocking.
+    if (editedThisIter && stepVerifiedOk && opts.onStepVerified) {
+      const pending = [...filesChanged].filter((f) => !committedFiles.has(f));
+      if (pending.length) {
+        for (const f of pending) committedFiles.add(f);
+        try {
+          opts.onStepVerified(pending, reply.slice(0, 120));
+        } catch {
+          /* git workflow is best-effort */
+        }
+      }
+    }
+
+    // P2.3: per-iteration timing for the live dashboard
+    opts.onEvent?.({
+      type: 'iteration_end',
+      index: iter,
+      durationMs: Date.now() - iterStart,
+      ...(llm.stats || {})
+    });
+
+    // P0.1: snapshot the full message list every iteration so a crash here
+    // loses at most one iteration of work.
+    snapshot();
   }
+
+  capGenuinelyReached = !answeredWithoutTools && !stoppedBeforeCap;
+  snapshot(); // final snapshot so callers can diff/save even on early answer
 
   return {
     reply,
@@ -917,7 +1638,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     toolCalls: toolResults,
     filesChanged: [...filesChanged],
     usedTools,
-    hitIterationCap: !answeredWithoutTools
+    hitIterationCap: capGenuinelyReached,
+    messages
   };
 }
 
@@ -925,7 +1647,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
 export interface JsonActionBatch {
   modifiedFiles: Array<{ filePath: string; content: string }>;
-  patches?: Array<{ filePath: string; oldText: string; newText: string }>;
+  patches?: Array<{ filePath: string; oldText?: string; newText?: string; patch?: string }>;
   commandToRun?: string;
 }
 
@@ -955,12 +1677,17 @@ export async function executeJsonActions(
   });
 
   for (const p of batch.patches || []) {
-    const r = await executeTool(root, mkCall('apply_patch', p));
+    const r = await executeTool(root, mkCall('apply_patch', {
+      path: p.filePath,
+      oldText: p.oldText,
+      newText: p.newText,
+      ...(typeof p.patch === 'string' ? { patch: p.patch } : {})
+    } as Record<string, any>));
     results.push(r);
     onAction?.(r);
   }
   for (const f of batch.modifiedFiles || []) {
-    const r = await executeTool(root, mkCall('write_file', f));
+    const r = await executeTool(root, mkCall('write_file', { path: f.filePath, content: f.content }));
     results.push(r);
     onAction?.(r);
   }

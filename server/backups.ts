@@ -121,3 +121,47 @@ export function revertFileFromBackup(rootAbs: string, rel: string): { reverted: 
   fs.copyFileSync(path.join(dir, normalized), path.join(rootAbs, normalized));
   return { reverted: true, backupName: path.basename(dir) };
 }
+
+// ---------------- P2.1: checkpoint timeline ----------------
+
+/** Resolve a backup name to its dir, refusing anything outside the backups root. */
+export function resolveCheckpointDir(rootAbs: string, backupName: string): string | null {
+  if (!/^[\w.-]+$/.test(backupName)) return null; // name charset guard
+  const dir = path.join(backupsRoot(rootAbs), backupName);
+  try {
+    // Path-escape guard: basename must survive resolution under the root
+    resolveSafePath(rootAbs, path.join('.opencode', 'backups', backupName));
+  } catch {
+    return null;
+  }
+  return fs.existsSync(dir) && fs.statSync(dir).isDirectory() ? dir : null;
+}
+
+export interface CheckpointFile {
+  path: string;
+  size: number;
+}
+
+/** Files captured inside one checkpoint (backup dir), relative paths, sorted. */
+export function listCheckpointFiles(rootAbs: string, backupName: string): CheckpointFile[] {
+  const dir = resolveCheckpointDir(rootAbs, backupName);
+  if (!dir) throw new Error('Checkpoint not found');
+  const files: CheckpointFile[] = [];
+  const walk = (d: string) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else {
+        const rel = path.relative(dir, full).replace(/\\/g, '/');
+        let size = 0;
+        try {
+          size = fs.statSync(full).size;
+        } catch {}
+        files.push({ path: rel, size });
+      }
+    }
+  };
+  walk(dir);
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  return files;
+}

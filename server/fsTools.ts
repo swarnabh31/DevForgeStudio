@@ -3,6 +3,7 @@ import path from 'path';
 import { execFile } from 'child_process';
 import ignore from 'ignore';
 import { DEFAULT_IGNORED_DIRS, getLanguageForFile, resolveSafePath } from './lib';
+import { loadProjectConfig } from './projectConfig';
 
 export const TEXT_EXTENSIONS = new Set(
   Object.keys({
@@ -29,6 +30,10 @@ export function looksBinary(buf: Buffer): boolean {
 export function buildIgnoreMatcher(rootAbs: string): ReturnType<typeof ignore> {
   const ig = ignore();
   ig.add([...DEFAULT_IGNORED_DIRS]); // names match at any depth via '**' semantics below
+
+  // P2.4: project-configured ignore globs from .devforge.json
+  const cfgGlobs = loadProjectConfig(rootAbs).ignoreGlobs;
+  if (cfgGlobs?.length) ig.add(cfgGlobs);
 
   const addIfPresent = (file: string) => {
     try {
@@ -392,14 +397,43 @@ export function getOutline(rootAbs: string, userPath: string): FileOutline {
   };
 }
 
-// ---------------- Conflict detection (E5) ----------------
+// ---------------- Conflict detection (E5 / P1.5f) ----------------
 
-/** Last-known mtimes for workspace files (recorded on agent reads/writes). */
-const knownMtimes = new Map<string, number>();
+/** Last-known state for workspace files (recorded on agent reads/writes). */
+interface KnownFileState {
+  mtimeMs: number;
+  size: number;
+  /** sha1 of content at record time; null for oversized/unreadable files */
+  hash: string | null;
+}
+const knownStates = new Map<string, KnownFileState>();
+/** Files the watcher confirmed were modified outside the agent mid-run. */
+const externalChanges = new Set<string>();
 
-export function recordMtime(absPath: string): void {
+const HASH_CAP_BYTES = 2 * 1024 * 1024;
+
+function hashFile(absPath: string): string | null {
   try {
-    knownMtimes.set(path.resolve(absPath), fs.statSync(absPath).mtimeMs);
+    const st = fs.statSync(absPath);
+    if (!st.isFile() || st.size > HASH_CAP_BYTES) return null;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { createHash } = require('crypto') as typeof import('crypto');
+    return createHash('sha1').update(fs.readFileSync(absPath)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record the agent's view of a file (after a read or an agent write).
+ * Clears any pending external-change flag for the file.
+ */
+export function recordMtime(absPath: string): void {
+  const key = path.resolve(absPath);
+  try {
+    const st = fs.statSync(key);
+    knownStates.set(key, { mtimeMs: st.mtimeMs, size: st.size, hash: hashFile(key) });
+    externalChanges.delete(key);
   } catch {
     /* file may not exist yet */
   }
@@ -412,22 +446,76 @@ export interface ConflictInfo {
 }
 
 /**
- * Detect external modification: if we recorded an mtime for this file and the
- * on-disk mtime now differs, someone edited it outside the agent since last touch.
+ * P1.5f: detect external modification since the agent last saw this file.
+ * Conflicted when (a) the watcher flagged a real divergence, or (b) the mtime
+ * differs AND the content hash differs (hash comparison avoids false positives
+ * from touch-only/mtime-granularity changes).
  */
 export function checkConflict(absPath: string): ConflictInfo {
+  const key = path.resolve(absPath);
   try {
-    const actual = fs.statSync(absPath).mtimeMs;
-    const expected = knownMtimes.get(path.resolve(absPath));
-    if (expected !== undefined && Math.abs(actual - expected) > 1) {
-      return { conflicted: true, expectedMtime: expected, actualMtime: actual };
+    const actual = fs.statSync(key);
+    const known = knownStates.get(key);
+    if (!known) return { conflicted: false, actualMtime: actual.mtimeMs };
+    if (externalChanges.has(key)) {
+      return { conflicted: true, expectedMtime: known.mtimeMs, actualMtime: actual.mtimeMs };
     }
-    return { conflicted: false, actualMtime: actual };
+    // Hash-first comparison (authoritative, immune to mtime granularity):
+    // only computed for files we could hash at record time (≤2 MB).
+    if (known.hash !== null) {
+      const currentHash = hashFile(key);
+      if (currentHash === null) {
+        return { conflicted: false, actualMtime: actual.mtimeMs }; // unreadable — don't guess
+      }
+      if (currentHash !== known.hash) {
+        return { conflicted: true, expectedMtime: known.mtimeMs, actualMtime: actual.mtimeMs };
+      }
+      // Identical content — refresh metadata quietly, never a conflict
+      known.mtimeMs = actual.mtimeMs;
+      known.size = actual.size;
+      return { conflicted: false, actualMtime: actual.mtimeMs };
+    }
+    // Hash-less fallback (oversized files): mtime/size signal
+    if (Math.abs(actual.mtimeMs - known.mtimeMs) > 1 || actual.size !== known.size) {
+      return { conflicted: true, expectedMtime: known.mtimeMs, actualMtime: actual.mtimeMs };
+    }
+    return { conflicted: false, actualMtime: actual.mtimeMs };
   } catch {
     return { conflicted: false };
   }
 }
 
+/**
+ * P1.5f: called by the workspace watcher for external 'change' events.
+ * Only files the agent has previously seen are tracked; the change is marked
+ * only when the on-disk content actually differs from the recorded hash (this
+ * filters out the watcher echoes of the agent's OWN writes, which refresh their
+ * record at write time).
+ */
+export function noteExternalChange(absPath: string): void {
+  const key = path.resolve(absPath);
+  const known = knownStates.get(key);
+  if (!known) return; // never seen by the agent — nothing to protect
+  try {
+    const st = fs.statSync(key);
+    const currentHash = hashFile(key);
+    if (st.size !== known.size || (known.hash !== null && currentHash !== null && currentHash !== known.hash)) {
+      externalChanges.add(key);
+    } else if (Math.abs(st.mtimeMs - known.mtimeMs) > 1 && known.hash === null && currentHash === null) {
+      externalChanges.add(key); // no hash available — trust size+mtime divergence
+    }
+  } catch {
+    /* vanished — unlink events are handled elsewhere */
+  }
+}
+
+/** Test/debug helper: is this file currently flagged as externally changed? */
+export function isFlaggedExternallyChanged(absPath: string): boolean {
+  return externalChanges.has(path.resolve(absPath));
+}
+
 export function forgetMtime(absPath: string): void {
-  knownMtimes.delete(path.resolve(absPath));
+  const key = path.resolve(absPath);
+  knownStates.delete(key);
+  externalChanges.delete(key);
 }

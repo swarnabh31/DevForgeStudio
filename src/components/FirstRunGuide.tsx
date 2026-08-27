@@ -4,6 +4,7 @@ import { Cpu, RefreshCw, TerminalSquare, Download, Search } from 'lucide-react';
 interface FirstRunGuideProps {
   onRescan: () => void;
   isScanning?: boolean;
+  onOpenWizard?: () => void;
 }
 
 const STEPS = [
@@ -12,7 +13,7 @@ const STEPS = [
   { icon: Search, title: 'Rescan', cmd: null }
 ];
 
-export const FirstRunGuide: React.FC<FirstRunGuideProps> = ({ onRescan, isScanning }) => (
+export const FirstRunGuide: React.FC<FirstRunGuideProps> = ({ onRescan, isScanning, onOpenWizard }) => (
   <div className="rounded-xl border border-cyan-700/50 bg-slate-900/80 p-5 shadow-lg">
     <div className="flex items-center gap-2 mb-1">
       <Cpu className="w-5 h-5 text-cyan-400" />
@@ -49,6 +50,14 @@ export const FirstRunGuide: React.FC<FirstRunGuideProps> = ({ onRescan, isScanni
       <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin' : ''}`} />
       {isScanning ? 'Scanning…' : 'Rescan for models'}
     </button>
+    {onOpenWizard && (
+      <button
+        onClick={onOpenWizard}
+        className="mt-3 w-full px-4 py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-600/50 text-emerald-200 text-sm font-semibold transition-colors"
+      >
+        Open guided setup wizard
+      </button>
+    )}
     <p className="mt-3 text-xs text-slate-500">
       Using LM Studio or another OpenAI-compatible server? Start it and add its endpoint via the
       model selector (chevron next to the model dropdown).

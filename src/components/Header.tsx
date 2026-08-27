@@ -13,7 +13,10 @@ import {
   Activity,
   RefreshCw,
   RotateCcw,
-  Brain
+  Brain,
+  BarChart3,
+  Columns3,
+  BookOpen
 } from 'lucide-react';
 import { AIModel, AgentSession, TaskMode } from '../types';
 
@@ -28,6 +31,13 @@ const TASK_MODES: Array<{ id: TaskMode; label: string }> = [
   { id: 'complex_task', label: 'Complex Task' }
 ];
 
+const WRITE_POLICIES: Array<{ id: 'ask' | 'allow' | 'deny' | 'review'; label: string }> = [
+  { id: 'ask', label: 'Ask' },
+  { id: 'review', label: 'Review diffs' },
+  { id: 'allow', label: 'Auto' },
+  { id: 'deny', label: 'Read-only' }
+];
+
 interface HeaderProps {
   currentModel: AIModel;
   availableModels: AIModel[];
@@ -35,6 +45,8 @@ interface HeaderProps {
   isScanningModels?: boolean;
   taskMode: TaskMode;
   onTaskModeChange: (mode: TaskMode) => void;
+  writePolicy?: 'ask' | 'allow' | 'deny' | 'review';
+  onWritePolicyChange?: (policy: 'ask' | 'allow' | 'deny' | 'review') => void;
   systemProfile?: { acceleration: string; totalVramMB: number } | null;
   sessions: AgentSession[];
   activeSessionId: string;
@@ -44,8 +56,8 @@ interface HeaderProps {
   onOpenLspModal: () => void;
   onOpenSettingsModal: () => void;
   prerequisitesReady: boolean;
-  activeTab: 'chat' | 'graph' | 'lsp' | 'memory';
-  setActiveTab: (tab: 'chat' | 'graph' | 'lsp' | 'memory') => void;
+  activeTab: 'chat' | 'graph' | 'lsp' | 'memory' | 'checkpoints' | 'stats' | 'board' | 'docs';
+  setActiveTab: (tab: 'chat' | 'graph' | 'lsp' | 'memory' | 'checkpoints' | 'stats' | 'board' | 'docs') => void;
   onRefreshApp?: () => void;
   onFactoryResetApp?: () => void;
 }
@@ -58,6 +70,8 @@ export const Header: React.FC<HeaderProps> = ({
   isScanningModels,
   taskMode,
   onTaskModeChange,
+  writePolicy = 'ask',
+  onWritePolicyChange,
   systemProfile,
   sessions,
   activeSessionId,
@@ -87,7 +101,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div>
             <div className="flex items-center space-x-2">
               <span className="font-bold text-base tracking-tight text-white flex items-center gap-1.5">
-                OpenCode <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">Studio v1.0</span>
+                DevForge <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">Studio v1.0</span>
               </span>
             </div>
             <p className="text-[11px] text-slate-400 flex items-center gap-1">
@@ -166,6 +180,54 @@ export const Header: React.FC<HeaderProps> = ({
           <Brain className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
           <span>Memory & Context</span>
         </button>
+
+        <button
+          onClick={() => setActiveTab('checkpoints')}
+          className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md transition-all ${
+            activeTab === 'checkpoints'
+              ? 'bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+          }`}
+        >
+          <RotateCcw className="w-3.5 h-3.5" />
+          <span>Checkpoints</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('stats')}
+          className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md transition-all ${
+            activeTab === 'stats'
+              ? 'bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+          }`}
+        >
+          <BarChart3 className="w-3.5 h-3.5" />
+          <span>Stats</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('board')}
+          className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md transition-all ${
+            activeTab === 'board'
+              ? 'bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+          }`}
+        >
+          <Columns3 className="w-3.5 h-3.5" />
+          <span>Board</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('docs')}
+          className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md transition-all ${
+            activeTab === 'docs'
+              ? 'bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+          }`}
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          <span>Docs</span>
+        </button>
       </div>
 
 
@@ -187,6 +249,27 @@ export const Header: React.FC<HeaderProps> = ({
             {TASK_MODES.map((m) => (
               <option key={m.id} value={m.id}>
                 Task: {m.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Write Policy Dropdown (P2.2 review mode gates edits behind per-hunk diff review) */}
+        <div
+          className="flex items-center rounded-lg bg-slate-800/90 border border-emerald-700/60 overflow-hidden"
+          title="Write policy: Ask prompts per edit, Review diffs lets you accept/reject individual diff hunks before they are applied, Auto applies everything, Read-only denies all writes"
+        >
+          <span className="pl-2.5 pr-1 text-emerald-300">
+            <ShieldCheck className="w-3.5 h-3.5" />
+          </span>
+          <select
+            value={writePolicy || 'ask'}
+            onChange={(e) => onWritePolicyChange?.(e.target.value as 'ask' | 'allow' | 'deny' | 'review')}
+            className="bg-transparent border-none outline-none text-xs text-white font-semibold py-1.5 pr-1 max-w-[150px] cursor-pointer appearance-none [&>option]:bg-slate-900 [&>option]:text-slate-100"
+          >
+            {WRITE_POLICIES.map((p) => (
+              <option key={p.id} value={p.id}>
+                Writes: {p.label}
               </option>
             ))}
           </select>

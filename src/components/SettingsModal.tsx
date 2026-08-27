@@ -1,5 +1,5 @@
 import React from 'react';
-import { Settings, X, Shield, Lock, Terminal, Cpu, Save, RotateCcw, Trash2 } from 'lucide-react';
+import { Settings, X, Shield, Lock, Terminal, Cpu, Save, RotateCcw, Trash2, ScrollText } from 'lucide-react';
 import { SystemSettings } from '../types';
 
 interface SettingsModalProps {
@@ -8,6 +8,7 @@ interface SettingsModalProps {
   settings: SystemSettings;
   onUpdateSettings: (newSettings: SystemSettings) => void;
   onFactoryResetApp?: () => void;
+  onOpenProjectRules?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -15,7 +16,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   settings,
   onUpdateSettings,
-  onFactoryResetApp
+  onFactoryResetApp,
+  onOpenProjectRules
 }) => {
   if (!isOpen) return null;
 
@@ -26,7 +28,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div>
             <h3 className="font-bold text-base flex items-center gap-2 text-white">
               <Settings className="w-5 h-5 text-emerald-400" />
-              OpenCode Studio System Settings
+              DevForge Studio System Settings
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
               Configure background prerequisite auto-installation, LSP type checking, and local privacy mode.
@@ -94,6 +96,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               className="w-4 h-4 rounded bg-slate-800 border-slate-700 text-emerald-500 focus:ring-emerald-500"
             />
           </div>
+
+          {/* P2.4: Project Rules */}
+          {onOpenProjectRules && (
+            <button
+              onClick={onOpenProjectRules}
+              className="w-full flex items-center justify-between p-3 rounded-xl bg-slate-950 border border-slate-800 hover:border-emerald-600/60 transition-colors text-left"
+            >
+              <div>
+                <span className="font-semibold text-slate-200 block text-sm">Project Rules</span>
+                <span className="text-slate-400 text-[11px]">
+                  Per-project instructions, write policy defaults, verify commands, and ignore globs (.devforge.json).
+                </span>
+              </div>
+              <ScrollText className="w-4 h-4 text-emerald-400 shrink-0 ml-3" />
+            </button>
+          )}
 
           {/* Ollama Endpoint Input */}
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
